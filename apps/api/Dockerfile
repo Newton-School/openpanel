@@ -59,7 +59,6 @@ RUN pnpm install --frozen-lockfile && \
 COPY apps/api ./apps/api
 COPY packages ./packages
 COPY tooling ./tooling
-COPY scripts ./scripts
 
 # Generate Prisma client for build (no DB connection required)
 RUN pnpm codegen && \
@@ -108,8 +107,10 @@ COPY --from=build /app/packages/sdks/sdk ./packages/sdks/sdk
 COPY --from=build /app/packages/constants ./packages/constants
 COPY --from=build /app/packages/validation ./packages/validation
 COPY --from=build /app/packages/integrations ./packages/integrations
-COPY --from=build /app/scripts ./scripts
-# Note: pnpm db:codegen moved to runtime init container
+COPY ./scripts ./scripts
+
+# Generate Prisma client for build (no DB connection required)
+RUN pnpm db:codegen
 
 WORKDIR /app/apps/api
 

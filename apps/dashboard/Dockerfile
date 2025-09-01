@@ -60,6 +60,7 @@ COPY apps/dashboard apps/dashboard
 COPY packages packages
 COPY tooling tooling
 COPY scripts scripts
+
 # Generate Prisma client for build (no DB connection required)
 RUN pnpm db:codegen
 
