@@ -49,9 +49,10 @@ RUN pnpm install --frozen-lockfile && \
 COPY apps/worker ./apps/worker
 COPY packages ./packages
 COPY tooling ./tooling
+COPY scripts ./scripts
 
-RUN pnpm codegen && \
-    pnpm --filter worker run build
+# Note: pnpm codegen moved to runtime init container
+RUN pnpm --filter worker run build
 
 # PROD
 FROM base AS prod
@@ -84,7 +85,8 @@ COPY --from=build /app/packages/queue ./packages/queue
 COPY --from=build /app/packages/common ./packages/common
 COPY --from=build /app/packages/validation ./packages/validation
 COPY --from=build /app/packages/integrations ./packages/integrations
-RUN pnpm db:codegen
+COPY --from=build /app/scripts ./scripts
+# Note: pnpm db:codegen moved to runtime init container
 
 WORKDIR /app/apps/worker
 

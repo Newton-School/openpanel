@@ -59,7 +59,8 @@ RUN pnpm install --frozen-lockfile --ignore-scripts
 COPY apps/dashboard apps/dashboard
 COPY packages packages
 COPY tooling tooling
-RUN pnpm db:codegen
+COPY scripts scripts
+# Note: pnpm db:codegen moved to runtime init container
 
 WORKDIR /app/apps/dashboard
 
