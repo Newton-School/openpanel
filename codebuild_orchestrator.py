@@ -337,6 +337,7 @@ def build_openpanel_api():
     proc = subprocess.run([
         'docker', 'build', 
         '--build-arg', f'IMAGE_REGISTRY={ECR_BASE_URL}',
+        '--build-arg', 'DATABASE_URL=postgresql://dummy:dummy@localhost:5432/dummy',
         '--build-arg', 'NEXT_PUBLIC_SELF_HOSTED=true',
         '--build-arg', 'SKIP_ENV_VALIDATION=1',
         '-f', 'apps/api/Dockerfile', 
@@ -385,6 +386,7 @@ def build_openpanel_dashboard():
     proc = subprocess.run([
         'docker', 'build', 
         '--build-arg', f'IMAGE_REGISTRY={ECR_BASE_URL}',
+        '--build-arg', 'DATABASE_URL=postgresql://dummy:dummy@localhost:5432/dummy',
         '--build-arg', 'NEXT_PUBLIC_SELF_HOSTED=true',
         '--build-arg', 'SKIP_ENV_VALIDATION=1',
         '-f', 'apps/dashboard/Dockerfile', 
@@ -433,6 +435,7 @@ def build_openpanel_worker():
     proc = subprocess.run([
         'docker', 'build', 
         '--build-arg', f'IMAGE_REGISTRY={ECR_BASE_URL}',
+        '--build-arg', 'DATABASE_URL=postgresql://dummy:dummy@localhost:5432/dummy',
         '--build-arg', 'NEXT_PUBLIC_SELF_HOSTED=true',
         '--build-arg', 'SKIP_ENV_VALIDATION=1',
         '-f', 'apps/worker/Dockerfile', 

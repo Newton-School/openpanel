@@ -60,7 +60,8 @@ COPY apps/dashboard apps/dashboard
 COPY packages packages
 COPY tooling tooling
 COPY scripts scripts
-# Note: pnpm db:codegen moved to runtime init container
+# Generate Prisma client for build (no DB connection required)
+RUN pnpm db:codegen
 
 WORKDIR /app/apps/dashboard
 

@@ -51,8 +51,9 @@ COPY packages ./packages
 COPY tooling ./tooling
 COPY scripts ./scripts
 
-# Note: pnpm codegen moved to runtime init container
-RUN pnpm --filter worker run build
+# Generate Prisma client for build (no DB connection required)
+RUN pnpm codegen && \
+    pnpm --filter worker run build
 
 # PROD
 FROM base AS prod
