@@ -50,7 +50,6 @@ COPY apps/worker ./apps/worker
 COPY packages ./packages
 COPY tooling ./tooling
 
-# Generate Prisma client for build (no DB connection required)
 RUN pnpm codegen && \
     pnpm --filter worker run build
 

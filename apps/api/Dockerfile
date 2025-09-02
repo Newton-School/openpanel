@@ -60,7 +60,6 @@ COPY apps/api ./apps/api
 COPY packages ./packages
 COPY tooling ./tooling
 
-# Generate Prisma client for build (no DB connection required)
 RUN pnpm codegen && \
     pnpm --filter api run build
 
@@ -109,7 +108,6 @@ COPY --from=build /app/packages/validation ./packages/validation
 COPY --from=build /app/packages/integrations ./packages/integrations
 COPY ./scripts ./scripts
 
-# Generate Prisma client for build (no DB connection required)
 RUN pnpm db:codegen
 
 WORKDIR /app/apps/api
