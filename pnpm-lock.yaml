@@ -17,6 +17,9 @@ importers:
       '@hyperdx/node-opentelemetry':
         specifier: ^0.8.1
         version: 0.8.1
+      dotenv-cli:
+        specifier: ^7.3.0
+        version: 7.3.0
       semver:
         specifier: ^7.5.4
         version: 7.6.0
@@ -30,12 +33,6 @@ importers:
       '@biomejs/biome':
         specifier: 1.9.1
         version: 1.9.1
-      dotenv-cli:
-        specifier: ^7.3.0
-        version: 7.3.0
-      prisma:
-        specifier: ^5.1.1
-        version: 5.9.1
       simple-git-hooks:
         specifier: ^2.12.1
         version: 2.12.1
@@ -1006,6 +1003,9 @@ importers:
       jiti:
         specifier: ^2.4.1
         version: 2.4.1
+      prisma-json-types-generator:
+        specifier: ^3.1.1
+        version: 3.1.1(prisma@5.9.1)(typescript@5.3.3)
       ramda:
         specifier: ^0.29.1
         version: 0.29.1
@@ -1040,9 +1040,6 @@ importers:
       prisma:
         specifier: ^5.1.1
         version: 5.9.1
-      prisma-json-types-generator:
-        specifier: ^3.1.1
-        version: 3.1.1(prisma@5.9.1)(typescript@5.3.3)
       typescript:
         specifier: ^5.2.2
         version: 5.3.3
@@ -10414,7 +10411,6 @@ packages:
   node-domexception@1.0.0:
     resolution: {integrity: sha512-/jKZoMpw0F8GRwl4/eLROPA3cfcXtLApP0QzLmUT/HuPCZWyB7IY9ZrMeKw2O/nFIqPQB3PVM9aYm0F312AXDQ==}
     engines: {node: '>=10.5.0'}
-    deprecated: Use your platform's native DOMException instead
 
   node-fetch-native@1.6.6:
     resolution: {integrity: sha512-8Mc2HhqPdlIfedsuZoc3yioPuzp6b+L5jRCRY1QzuWZh2EGJVQrGppC6V6cF0bLdbW0+O2YpqCA25aF/1lvipQ==}
@@ -12007,7 +12003,6 @@ packages:
   source-map@0.8.0-beta.0:
     resolution: {integrity: sha512-2ymg6oRBpebeZi9UUNsgQ89bhx01TcTkmNTGnNO88imTmbSgy4nfujrgVEFKWpMTEGA11EDkTt7mqObTPdigIA==}
     engines: {node: '>= 8'}
-    deprecated: The work that was done in this beta branch won't be included in future versions
 
   space-separated-tokens@1.1.5:
     resolution: {integrity: sha512-q/JSVd1Lptzhf5bkYm4ob4iWPjx0KiRe3sRFBNrVqbJkFaBm5vbbowy1mymoPNLRa52+oadOhJ+K49wsSeSjTA==}
