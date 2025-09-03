@@ -12,10 +12,13 @@
     },
     "appDependencies": {
         "openpanel_api": [
+            "scripts"
         ],
         "openpanel_dashboard": [
+            "scripts"
         ],
         "openpanel_worker": [
+            "scripts"
         ]
     }
 }
