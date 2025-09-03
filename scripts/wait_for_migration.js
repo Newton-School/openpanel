@@ -38,7 +38,7 @@ class DatabaseWaiter {
       if (!this.prisma) {
         this.prisma = new PrismaClient();
       }
-      
+
       // Test basic connection
       await this.prisma.$queryRaw`SELECT 1`;
       return true;
@@ -61,19 +61,19 @@ class DatabaseWaiter {
           WHERE table_name = '_prisma_migrations'
         ) as migration_table_exists
       `;
-      
+
       if (result[0].migration_table_exists) {
         // Check for failed migrations
         const failedMigrations = await this.prisma.$queryRaw`
           SELECT * FROM _prisma_migrations 
           WHERE finished_at IS NULL AND started_at IS NOT NULL
         `;
-        
+
         if (failedMigrations.length > 0) {
           throw new Error('Found failed migrations. Database migrations may still be running.');
         }
       }
-      
+
       return true;
     } catch (error) {
       if (error.message.includes('relation "_prisma_migrations" does not exist')) {
@@ -85,28 +85,28 @@ class DatabaseWaiter {
 
   async waitForStableConnection() {
     this.log('Checking for valid database connection...');
-    
+
     while (true) {
       await this.checkTimeout();
-      
+
       try {
         await this.testConnection();
-        
+
         if (!this.connectionStableStart) {
           this.connectionStableStart = Date.now();
           this.log('Database connection established, checking stability...');
         }
-        
+
         const stableFor = Date.now() - this.connectionStableStart;
         this.log(`Connection stable for ${Math.floor(stableFor / 1000)}s`);
-        
+
         if (stableFor >= this.stableDuration) {
           this.log('Database connection is stable');
           break;
         }
-        
+
         await new Promise(resolve => setTimeout(resolve, this.checkInterval));
-        
+
       } catch (error) {
         this.connectionStableStart = null;
         this.log(`Waiting for database (${error.message})`);
@@ -117,10 +117,10 @@ class DatabaseWaiter {
 
   async waitForMigrations() {
     this.log('Checking for pending migrations...');
-    
+
     while (true) {
       await this.checkTimeout();
-      
+
       try {
         await this.checkPendingMigrations();
         this.log('No pending migrations found');
@@ -155,7 +155,7 @@ class DatabaseWaiter {
     try {
       await this.waitForStableConnection();
       await this.waitForMigrations();
-      await this.runPrismaCodegen();
+      // await this.runPrismaCodegen(); // already being done during build
       this.log('Database is ready and Prisma client generated successfully');
       this.log('NOTE: This init container waits for migrations (run by migration pod) and generates Prisma client per service');
     } finally {
@@ -167,7 +167,7 @@ class DatabaseWaiter {
 // CLI handling
 async function main() {
   const args = process.argv.slice(2);
-  
+
   // Parse basic arguments
   let timeout = DEFAULT_TIMEOUT;
   const timeoutArg = args.find(arg => arg.startsWith('--timeout='));
@@ -176,7 +176,7 @@ async function main() {
   }
 
   const waiter = new DatabaseWaiter({ timeout });
-  
+
   try {
     await waiter.wait();
     process.exit(0);

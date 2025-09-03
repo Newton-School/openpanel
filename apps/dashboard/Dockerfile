@@ -59,7 +59,6 @@ RUN pnpm install --frozen-lockfile --ignore-scripts
 COPY apps/dashboard apps/dashboard
 COPY packages packages
 COPY tooling tooling
-COPY scripts scripts
 
 RUN pnpm db:codegen
 
@@ -94,6 +93,8 @@ COPY --from=build --chown=nextjs:nodejs /app/apps/dashboard/public ./apps/dashbo
 # Copy and set permissions for the entrypoint script
 COPY --from=build --chown=nextjs:nodejs /app/apps/dashboard/entrypoint.sh ./entrypoint.sh
 RUN chmod +x ./entrypoint.sh
+
+COPY ./scripts ./scripts
 
 USER nextjs
 
