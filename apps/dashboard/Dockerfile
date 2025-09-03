@@ -95,6 +95,7 @@ COPY --from=build --chown=nextjs:nodejs /app/apps/dashboard/entrypoint.sh ./entr
 RUN chmod +x ./entrypoint.sh
 
 COPY ./scripts ./scripts
+RUN chown -R nextjs:nodejs ./scripts
 
 USER nextjs
 
