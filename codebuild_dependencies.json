@@ -1,0 +1,24 @@
+{
+    "sourceDependencies": {
+        "openpanel_api": [
+            "apps/api",
+            "scripts"
+        ],
+        "openpanel_dashboard": [
+            "apps/dashboard",
+            "scripts"
+        ],
+        "openpanel_worker": [
+            "apps/worker",
+            "scripts"
+        ]
+    },
+    "appDependencies": {
+        "openpanel_api": [
+        ],
+        "openpanel_dashboard": [
+        ],
+        "openpanel_worker": [
+        ]
+    }
+}
