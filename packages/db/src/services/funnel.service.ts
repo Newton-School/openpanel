@@ -134,24 +134,23 @@ export class FunnelService {
         clix.datetime(startDate),
         clix.datetime(endDate),
       ])
-      .where(
-        'name',
-        'IN',
-        events.map((e) => e.name),
-      )
+      .where('name', 'IN', events.map((e) => e.name))
+      .rawWhere(`(${funnels.map((f) => `(${f})`).join(' OR ')})`)
       .groupBy([group[1], ...breakdowns.map((b, index) => `b_${index}`)]);
 
     // Create the sessions CTE if needed
     const sessionsCte =
       group[0] !== 'session_id'
         ? clix(this.client)
-            .select(['profile_id', 'id'])
+            .select(['id', 'argMax(profile_id, version) AS profile_id'])
             .from(TABLE_NAMES.sessions)
             .where('project_id', '=', projectId)
             .where('created_at', 'BETWEEN', [
               clix.datetime(startDate),
               clix.datetime(endDate),
             ])
+            .groupBy(['id'])
+            .having('sum(sign)', '>', 0)
         : null;
 
     // Base funnel query with CTEs
