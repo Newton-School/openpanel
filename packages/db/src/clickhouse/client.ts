@@ -107,7 +107,8 @@ async function withRetry<T>(
       if (
         error.message.includes('Connect') ||
         error.message.includes('socket hang up') ||
-        error.message.includes('Timeout error')
+        error.message.includes('Timeout error') ||
+        error.message.includes('Too many simultaneous')
       ) {
         const delay = baseDelay * 2 ** attempt;
         logger.warn(
@@ -143,38 +144,40 @@ export async function chQueryWithMeta<T extends Record<string, any>>(
   query: string,
   clickhouseSettings?: ClickHouseSettings,
 ): Promise<ResponseJSON<T>> {
-  const start = Date.now();
-  const res = await ch.query({
-    query,
-    clickhouse_settings: clickhouseSettings,
-  });
-  const json = await res.json<T>();
-  const keys = Object.keys(json.data[0] || {});
-  const response = {
-    ...json,
-    data: json.data.map((item) => {
-      return keys.reduce((acc, key) => {
-        const meta = json.meta?.find((m) => m.name === key);
-        return {
-          ...acc,
-          [key]:
-            item[key] && meta?.type.includes('Int')
-              ? Number.parseFloat(item[key] as string)
-              : item[key],
-        };
-      }, {} as T);
-    }),
-  };
+  return withRetry(async () => {
+    const start = Date.now();
+    const res = await ch.query({
+      query,
+      clickhouse_settings: clickhouseSettings,
+    });
+    const json = await res.json<T>();
+    const keys = Object.keys(json.data[0] || {});
+    const response = {
+      ...json,
+      data: json.data.map((item) => {
+        return keys.reduce((acc, key) => {
+          const meta = json.meta?.find((m) => m.name === key);
+          return {
+            ...acc,
+            [key]:
+              item[key] && meta?.type.includes('Int')
+                ? Number.parseFloat(item[key] as string)
+                : item[key],
+          };
+        }, {} as T);
+      }),
+    };
 
-  logger.info('query info', {
-    query: cleanQuery(query),
-    rows: json.rows,
-    stats: response.statistics,
-    elapsed: Date.now() - start,
-    clickhouseSettings,
-  });
+    logger.info('query info', {
+      query: cleanQuery(query),
+      rows: json.rows,
+      stats: response.statistics,
+      elapsed: Date.now() - start,
+      clickhouseSettings,
+    });
 
-  return response;
+    return response;
+  });
 }
 
 export async function chQuery<T extends Record<string, any>>(

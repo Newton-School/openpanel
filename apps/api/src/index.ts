@@ -217,6 +217,16 @@ const startServer = async () => {
           });
         });
       }
+
+      process.on('unhandledRejection', (reason) => {
+        logger.error('unhandledRejection', { error: reason });
+        process.exit(1);
+      });
+
+      process.on('uncaughtException', (error) => {
+        logger.error('uncaughtException', { error });
+        process.exit(1);
+      });
     }
 
     await fastify.listen({
