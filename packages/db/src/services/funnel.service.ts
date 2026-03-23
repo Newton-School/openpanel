@@ -106,7 +106,8 @@ export class FunnelService {
     funnelWindow = 24,
     funnelGroup,
     breakdowns = [],
-  }: IChartInput) {
+    timezone = 'UTC',
+  }: IChartInput & { timezone?: string }) {
     if (!startDate || !endDate) {
       throw new Error('startDate and endDate are required');
     }
@@ -120,7 +121,7 @@ export class FunnelService {
     const funnels = this.getFunnelConditions(events);
 
     // Create the funnel CTE
-    const funnelCte = clix(this.client)
+    const funnelCte = clix(this.client, timezone)
       .select([
         `${group[0]} AS ${group[1]}`,
         ...breakdowns.map(
@@ -141,7 +142,7 @@ export class FunnelService {
     // Create the sessions CTE if needed
     const sessionsCte =
       group[0] !== 'session_id'
-        ? clix(this.client)
+        ? clix(this.client, timezone)
             .select(['id', 'argMax(profile_id, version) AS profile_id'])
             .from(TABLE_NAMES.sessions)
             .where('project_id', '=', projectId)
@@ -154,7 +155,7 @@ export class FunnelService {
         : null;
 
     // Base funnel query with CTEs
-    const funnelQuery = clix(this.client);
+    const funnelQuery = clix(this.client, timezone);
 
     if (sessionsCte) {
       funnelCte.leftJoin('sessions s', 's.id = session_id');
