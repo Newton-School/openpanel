@@ -346,7 +346,8 @@ export const chartRouter = createTRPCRouter({
           .where('project_id', '=', projectId)
           .where('property_key', '=', property.replace(/^properties\./, ''))
           .groupBy(['property_value'])
-          .orderBy('created_at', 'DESC');
+          .orderBy('created_at', 'DESC')
+          .limit(Number(process.env.MAX_PROPERTY_FILTER_VALUES) || 500);
 
         if (event && event !== '*') {
           query.where('name', '=', event);

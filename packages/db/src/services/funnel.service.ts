@@ -98,6 +98,7 @@ export class FunnelService {
         'IN',
         eventSeries.map((e) => e.name),
       )
+      .rawWhere(`(${funnels.map((f) => `(${f})`).join(' OR ')})`)
       .groupBy([primaryKey, ...additionalGroupBy]);
   }
 

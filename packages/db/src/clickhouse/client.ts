@@ -164,7 +164,8 @@ export async function withRetry<T>(
       if (
         error.message.includes('Connect') ||
         error.message.includes('socket hang up') ||
-        error.message.includes('Timeout error')
+        error.message.includes('Timeout error') ||
+        error.message.includes('Too many simultaneous')
       ) {
         const delay = baseDelay * 2 ** attempt;
         logger.warn(
