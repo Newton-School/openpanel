@@ -111,6 +111,7 @@ COPY --from=build /app/packages/validation ./packages/validation
 COPY --from=build /app/packages/integrations ./packages/integrations
 COPY --from=build /app/packages/js-runtime ./packages/js-runtime
 COPY --from=build /app/tooling/typescript ./tooling/typescript
+COPY ./scripts ./scripts
 RUN pnpm db:codegen
 
 WORKDIR /app/apps/api
