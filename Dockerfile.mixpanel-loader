@@ -1,0 +1,42 @@
+# One-off image for packages/db/scripts/migrate-newton-mixpanel-profiles.ts
+# (the Mixpanel -> OpenPanel P1 profile loader). Runs the TS script via jiti,
+# reusing @openpanel/db (ch/chQuery/toDots) so output == the live import path.
+# Build context = repo root (pnpm workspace). node_modules excluded by .dockerignore.
+#
+#   docker buildx build --platform linux/amd64 -f Dockerfile.mixpanel-loader \
+#     -t newtonschool/mixpanel-migration:loader --push .
+#
+# Layering: dependency manifests are isolated and installed BEFORE the source is
+# copied, so a source-only edit only rebuilds the tiny final COPY layer — the
+# heavy node_modules layer keeps its digest and is NOT re-pushed.
+ARG NODE_VERSION=22.20.0
+FROM node:${NODE_VERSION}-slim AS base
+ENV COREPACK_INTEGRITY_KEYS=0
+ENV PNPM_HOME="/pnpm"
+ENV PATH="$PNPM_HOME:$PATH"
+RUN corepack enable && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates openssl libssl3 && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+
+# Stage 1: extract ONLY the workspace manifests (every package.json + lockfile +
+# workspace file), preserving paths. This stage's output is byte-identical across
+# source-only edits, so everything downstream stays cached.
+FROM base AS manifests
+COPY . /src
+RUN cd /src && \
+    find . -name package.json -not -path '*/node_modules/*' -exec cp --parents {} /app \; && \
+    cp pnpm-lock.yaml pnpm-workspace.yaml /app/ && \
+    for f in patches .npmrc .pnpmfile.cjs; do [ -e "$f" ] && cp -r "$f" /app/ || true; done
+
+# Stage 2: install from manifests only (no source needed — jiti runs TS at runtime,
+# there is no build step). Cached unless a package.json / lockfile changes.
+FROM base AS final
+COPY --from=manifests /app ./
+RUN pnpm install --filter "@openpanel/db..." --frozen-lockfile
+
+# Source last: a tiny layer that's the only thing re-pushed on a code change.
+COPY . .
+WORKDIR /app/packages/db
+ENTRYPOINT ["pnpm", "exec", "jiti", "scripts/migrate-newton-mixpanel-profiles.ts"]

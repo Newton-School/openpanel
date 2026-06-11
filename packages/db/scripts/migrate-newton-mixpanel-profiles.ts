@@ -22,6 +22,10 @@
  *   newton UserProfile.uid = Mixpanel profile property `userId`.
  *   Profiles that don't resolve to a uid (leads/anon) are SKIPPED — P1 = identified only.
  *
+ * is_external = TRUE for every migrated row: OpenPanel's getProfileName() renders
+ *   any profile with is_external=false as "Anonymous" regardless of name/email;
+ *   true = an identified (externally-keyed) user. The Mixpanel importer does the same.
+ *
  * Merge policy (settled in design):
  *   - Within Mixpanel: multiple profiles can point to one uid. Fold them
  *     freshest-`$last_seen`-wins, older profiles only fill missing keys (union).
@@ -29,21 +33,31 @@
  *     Mixpanel only fills gaps. created_at is bumped +1ms over the existing row so
  *     our write wins the ReplacingMergeTree(created_at) de-dup.
  *
- * Safety / staged-rollout controls:
- *   --dry-run            transform + group only; never touch ClickHouse
- *   --sample N           (dry-run) print N built rows so you can eyeball the transform
- *   --limit N            cap profiles SCANNED from disk (fast iteration)
- *   --only uid[,uid...]  restrict the whole run to specific uid(s)
- *   --new-only           insert ONLY uids absent from OpenPanel (skip existing)
- *   --max-insert N       stop after N profiles actually inserted
- *   --show-rows          print every row as it is inserted (live)
+ * Every migrated row carries properties['__mp_migrated']='1' — provenance AND the
+ * resume signal (see --resume).
  *
- * Single-profile smoke test (1 profile that's in Mixpanel but NOT in OpenPanel):
+ * Throughput / safety controls (full run):
+ *   --concurrency N      N concurrent fetch+insert pipelines (default 1)
+ *   --control PATH       JSON {"rowsPerSec":N,"paused":bool} re-read before every
+ *                        batch; a shared token bucket caps the AGGREGATE insert rate
+ *                        across workers. Back it with a ConfigMap mounted as a dir
+ *                        (not subPath) so `kubectl edit cm loader-control` propagates
+ *                        live (~60s) with no restart. rowsPerSec<=0 / missing = unlimited.
+ *   --resume             skip uids already migrated, by exact per-uid check of the
+ *                        '__mp_migrated' marker (read for free from each batch's
+ *                        existing-profile fetch). Robust to stray/out-of-order prior
+ *                        inserts — no frontier/monotonicity assumption.
+ *   --marker KEY         provenance/resume property key (default __mp_migrated)
+ *
+ * Staged-rollout / debug controls:
+ *   --dry-run / --sample N / --limit N / --only uid,uid / --new-only / --max-insert N / --show-rows
+ *
+ * Single-profile smoke test (1 profile in Mixpanel but NOT in OpenPanel):
  *   ... --new-only --max-insert 1 --show-rows --batch 200
- * Full P1 mass import (after verification):
- *   ... --project-id <PLATFORM_PROJECT_ID>
+ * Full P1 import (after verification):
+ *   ... --concurrency 6 --control /control/control.json --resume
  */
-import { createReadStream } from 'node:fs';
+import { createReadStream, readFileSync } from 'node:fs';
 import { readFile, readdir } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { parseArgs } from 'node:util';
@@ -55,17 +69,21 @@ import type { IClickhouseProfile } from '../src/services/profile.service';
 // ---- args ----------------------------------------------------------------
 const { values } = parseArgs({
   options: {
-    dir: { type: 'string' }, // local dir of page-*.jsonl.gz
-    gap: { type: 'string' }, // local mixpanel_email_uid.json
+    dir: { type: 'string' },
+    gap: { type: 'string' },
     'project-id': { type: 'string' },
     batch: { type: 'string', default: '5000' },
+    concurrency: { type: 'string', default: '1' },
+    control: { type: 'string' },
+    resume: { type: 'boolean', default: false },
+    marker: { type: 'string', default: '__mp_migrated' },
     'dry-run': { type: 'boolean', default: false },
-    sample: { type: 'string' }, // dry-run: print N built rows (MP-only)
-    limit: { type: 'string' }, // cap profiles scanned
-    only: { type: 'string' }, // comma-sep uids to restrict to
-    'new-only': { type: 'boolean', default: false }, // insert only uids absent from OP
-    'max-insert': { type: 'string' }, // stop after N inserted
-    'show-rows': { type: 'boolean', default: false }, // print each inserted row
+    sample: { type: 'string' },
+    limit: { type: 'string' },
+    only: { type: 'string' },
+    'new-only': { type: 'boolean', default: false },
+    'max-insert': { type: 'string' },
+    'show-rows': { type: 'boolean', default: false },
   },
   strict: true,
 });
@@ -74,6 +92,10 @@ const DIR = values.dir;
 const GAP_PATH = values.gap;
 const PROJECT_ID = values['project-id'];
 const BATCH = Number.parseInt(values.batch ?? '5000', 10);
+const CONCURRENCY = Math.max(1, Number.parseInt(values.concurrency ?? '1', 10));
+const CONTROL_PATH = values.control;
+const RESUME = values.resume ?? false;
+const MARKER = values.marker ?? '__mp_migrated';
 const DRY_RUN = values['dry-run'] ?? false;
 const LIMIT = values.limit ? Number.parseInt(values.limit, 10) : Number.POSITIVE_INFINITY;
 const ONLY = values.only
@@ -90,18 +112,24 @@ if (!DIR || !GAP_PATH || !PROJECT_ID) {
   process.exit(1);
 }
 
-// ---- transform constants (mirror of the validated Go loader) -------------
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-// junk / internal / promoted profile keys — dropped from the property map
-// because they become dedicated columns or carry no value.
+// ---- transform constants -------------------------------------------------
 const DROP_KEYS = new Set([
   '$distinct_id', '$distint_id', '$userid', '$avatar', '$image',
   '$first_name', '$last_name',
   '$mp_api_endpoint', '$mp_api_timestamp_ms', '$import',
-  'userId',                 // -> id
-  '$email', 'email',        // -> email column
-  '$name',                  // -> first/last name
+  'userId',                 // -> id column
+  'email',                  // plain dup; OP uses $email + the email column
 ]);
+
+// Mixpanel "people" props that OpenPanel's Newton integration stores VERBATIM
+// (with the leading $). Keep them as-is so we match OP's keys instead of creating
+// $-stripped dups (our `phone` vs OP's `$phone`). The email/first/last-name COLUMNS
+// are still derived from $email/$name separately (see Merged.fold) — these are the
+// redundant property copies native profiles also carry, so segments on
+// properties['$phone'|'$email'|...] hit migrated users too.
+const PRESERVE_DOLLAR = new Set(['$phone', '$email', '$name', '$username']);
 
 type Props = Record<string, unknown>;
 
@@ -113,17 +141,25 @@ const firstStr = (p: Props, ...keys: string[]): string => {
   return '';
 };
 
-/** strip leading '$', drop junk/$mp_, flatten via OpenPanel's toDots → Map(String,String). */
+// Mixpanel's country lives under $country_code (profiles) / $country / mp_country_code,
+// but OpenPanel's geo display (SerieIcon flag, header) keys off a property named
+// `country` with the ISO-2 value (matches the importer's transformEvent mapping).
+// Other geo keys ($city->city, $region->region) already match after the $-strip.
+const COUNTRY_SRC = ['$country_code', '$country', 'mp_country_code'];
+
 function cleanProps(props: Props): Record<string, string> {
   const obj: Props = {};
   for (const [k, v] of Object.entries(props)) {
     if (DROP_KEYS.has(k) || k.startsWith('$mp_')) continue;
-    obj[k.startsWith('$') ? k.slice(1) : k] = v;
+    if (COUNTRY_SRC.includes(k)) continue;            // -> `country` below
+    if (PRESERVE_DOLLAR.has(k)) { obj[k] = v; continue; } // $phone/$email/$name/$username verbatim
+    obj[k.startsWith('$') ? k.slice(1) : k] = v;      // $city->city, $os->os, ... (match OP enrichment)
   }
-  return toDots(obj); // same flatten the live import path applies
+  const country = firstStr(props, ...COUNTRY_SRC);
+  if (country) obj.country = country; // ISO-2; SerieIcon lowercases for the flag
+  return toDots(obj);
 }
 
-/** $last_seen ("2024-11-02T08:48:09", no tz) → unix seconds; 0 if absent/unparseable. */
 function lastSeenSec(v: unknown): number {
   if (typeof v !== 'string' || v === '') return 0;
   const ms = Date.parse(v.endsWith('Z') || /[+-]\d\d:?\d\d$/.test(v) ? v : `${v}Z`);
@@ -131,7 +167,7 @@ function lastSeenSec(v: unknown): number {
 }
 
 // ---- identity ------------------------------------------------------------
-type GapMap = Map<string, string>; // email | "u:"+username -> newton uid
+type GapMap = Map<string, string>;
 
 function resolveUid(props: Props, gap: GapMap): string {
   const own = props.userId;
@@ -150,8 +186,6 @@ function resolveUid(props: Props, gap: GapMap): string {
 }
 
 // ---- per-uid fold-merge --------------------------------------------------
-// Order-independent freshest-wins + union: a profile whose $last_seen >= the
-// current max overlays its values; an older one only fills missing keys.
 class Merged {
   props: Record<string, string> = {};
   maxSeen = -1;
@@ -242,10 +276,12 @@ function build(uid: string, m: Merged, existing?: Existing): Omit<IClickhousePro
     }
   }
 
+  props[MARKER] = '1'; // provenance + resume marker, set last so it always survives
+
   const [first, last] = splitName(fullName);
   return {
     id: uid,
-    is_external: false, // identified users (matches live)
+    is_external: true, // identified user — false renders as "Anonymous" in the UI
     first_name: first,
     last_name: last,
     email,
@@ -255,6 +291,39 @@ function build(uid: string, m: Merged, existing?: Existing): Omit<IClickhousePro
     created_at: fmtCH(createdAt),
   };
 }
+
+// ---- live rate control (shared token bucket, ConfigMap-backed) -----------
+const control = { rowsPerSec: 0, paused: false };
+
+function applyControl() {
+  if (!CONTROL_PATH) return;
+  try {
+    const c = JSON.parse(readFileSync(CONTROL_PATH, 'utf8'));
+    if (typeof c.rowsPerSec === 'number') control.rowsPerSec = c.rowsPerSec;
+    if (typeof c.paused === 'boolean') control.paused = c.paused;
+  } catch {
+    /* keep last good values if the file is mid-write or absent */
+  }
+}
+
+const bucket = {
+  tokens: 0,
+  last: Date.now(),
+  // acquire n row-tokens; honors live rowsPerSec + paused. Safe under concurrency
+  // because token math runs synchronously between awaits (single JS thread).
+  async acquire(n: number) {
+    while (control.paused) await sleep(1000);
+    const rate = control.rowsPerSec;
+    if (!rate || rate <= 0) return; // unlimited
+    for (;;) {
+      const now = Date.now();
+      this.tokens = Math.min(rate, this.tokens + ((now - this.last) / 1000) * rate);
+      this.last = now;
+      if (this.tokens >= n) { this.tokens -= n; return; }
+      await sleep(Math.min(1000, ((n - this.tokens) / rate) * 1000));
+    }
+  },
+};
 
 // ---- main ----------------------------------------------------------------
 async function main() {
@@ -290,14 +359,11 @@ async function main() {
       const props = rec.$properties;
       if (!props) continue;
       const uid = resolveUid(props, gap);
-      if (!uid) continue; // P1: identified only
+      if (!uid) continue;
       if (ONLY && !ONLY.has(uid)) continue;
       resolved++;
       let m = merged.get(uid);
-      if (!m) {
-        m = new Merged();
-        merged.set(uid, m);
-      }
+      if (!m) { m = new Merged(); merged.set(uid, m); }
       m.fold(props);
     }
     console.log(`[scan] ${f}  total=${total} resolved=${resolved} uids=${merged.size}`);
@@ -306,7 +372,7 @@ async function main() {
 
   if (ONLY) {
     const missing = [...ONLY].filter((u) => !merged.has(u));
-    console.log(`[only] ${merged.size}/${ONLY.size} requested uids present in Mixpanel` +
+    console.log(`[only] ${merged.size}/${ONLY.size} requested uids present` +
       (missing.length ? ` (missing: ${missing.join(',')})` : ''));
   }
 
@@ -319,32 +385,72 @@ async function main() {
     return;
   }
 
-  const uids = [...merged.keys()];
+  // Deterministic order (stable batching run-to-run).
+  const uids = [...merged.keys()].sort();
+  if (RESUME) {
+    console.log(`[resume] on — exact per-uid skip of profiles already marked '${MARKER}'. ` +
+      `Robust to stray/out-of-order prior inserts (no frontier assumption).`);
+  }
+
+  // Workers pull batches off a shared cursor.
+  const batchStarts: number[] = [];
+  for (let i = 0; i < uids.length; i += BATCH) batchStarts.push(i);
+
   let written = 0;
   let skippedExisting = 0;
-  for (let i = 0; i < uids.length && written < MAX_INSERT; i += BATCH) {
-    const ids = uids.slice(i, i + BATCH);
-    const existing = await fetchExisting(ids);
+  let skippedDone = 0;
+  let cursor = 0;
+  applyControl();
 
-    let rows = ids
-      .filter((uid) => !(NEW_ONLY && existing.has(uid)))
-      .map((uid) => build(uid, merged.get(uid)!, existing.get(uid)));
-    skippedExisting += ids.length - rows.length;
+  async function worker() {
+    for (;;) {
+      const bi = cursor++;
+      if (bi >= batchStarts.length || written >= MAX_INSERT) return;
+      const start = batchStarts[bi]!;
+      const ids = uids.slice(start, start + BATCH);
+      applyControl(); // pick up live rowsPerSec / paused
 
-    const room = MAX_INSERT - written;
-    if (rows.length > room) rows = rows.slice(0, room);
-    if (rows.length === 0) continue;
+      const existing = await fetchExisting(ids);
+      const rows: Array<Omit<IClickhouseProfile, 'groups'>> = [];
+      for (const uid of ids) {
+        const ex = existing.get(uid);
+        if (NEW_ONLY && ex) { skippedExisting++; continue; }
+        if (RESUME && ex?.properties?.[MARKER] === '1') { skippedDone++; continue; }
+        const row = build(uid, merged.get(uid)!, ex);
+        if (SHOW_ROWS) {
+          if (ex) {
+            console.log('[existing]', JSON.stringify({
+              id: uid, is_external: ex.is_external, first_name: ex.first_name,
+              last_name: ex.last_name, email: ex.email, properties: ex.properties,
+              created_at: ex.created_at,
+            }));
+          }
+          console.log('[row]', JSON.stringify(row)); // OP-wins result (compare to [existing])
+        }
+        rows.push(row);
+      }
 
-    if (SHOW_ROWS) for (const r of rows) console.log('[row]', JSON.stringify(r));
-    await ch.insert({ table: TABLE_NAMES.profiles, values: rows, format: 'JSONEachRow' });
-    written += rows.length;
+      const room = MAX_INSERT - written;
+      const toWrite = rows.length > room ? rows.slice(0, room) : rows;
+      if (toWrite.length === 0) continue;
 
-    if (MAX_INSERT !== Number.POSITIVE_INFINITY || (i / BATCH) % 10 === 0) {
-      const denom = MAX_INSERT !== Number.POSITIVE_INFINITY ? MAX_INSERT : uids.length;
-      console.log(`[insert] written=${written}/${denom} skippedExisting=${skippedExisting}`);
+      await bucket.acquire(toWrite.length);
+      await ch.insert({ table: TABLE_NAMES.profiles, values: toWrite, format: 'JSONEachRow' });
+      written += toWrite.length;
+
+      if (bi % 20 === 0 || MAX_INSERT !== Number.POSITIVE_INFINITY) {
+        const denom = MAX_INSERT !== Number.POSITIVE_INFINITY ? MAX_INSERT : uids.length;
+        console.log(`[insert] written=${written}/${denom} skippedExisting=${skippedExisting} ` +
+          `skippedDone=${skippedDone} rate=${control.rowsPerSec || 'unl'}${control.paused ? ' PAUSED' : ''}`);
+      }
     }
   }
-  console.log(`[DONE] profiles_written=${written} skipped_existing=${skippedExisting}`);
+
+  console.log(`[load] ${batchStarts.length} batches of ${BATCH}, concurrency=${CONCURRENCY}, ` +
+    `control=${CONTROL_PATH ?? 'none'}, resume=${RESUME}`);
+  await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
+
+  console.log(`[DONE] profiles_written=${written} skipped_existing=${skippedExisting} skipped_done=${skippedDone}`);
 }
 
 main()
