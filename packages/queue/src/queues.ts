@@ -142,6 +142,11 @@ export type CronQueuePayloadCohortRefresh = {
   type: 'cohortRefresh';
   payload: undefined;
 };
+// Newton fork: discover shared-cookie -> uid links into profile_aliases.
+export type CronQueuePayloadProfileAlias = {
+  type: 'profileAlias';
+  payload: undefined;
+};
 export type CronQueuePayload =
   | CronQueuePayloadSalt
   | CronQueuePayloadFlushEvents
@@ -155,7 +160,8 @@ export type CronQueuePayload =
   | CronQueuePayloadInsightsDaily
   | CronQueuePayloadOnboarding
   | CronQueuePayloadGscSync
-  | CronQueuePayloadCohortRefresh;
+  | CronQueuePayloadCohortRefresh
+  | CronQueuePayloadProfileAlias;
 
 export type MiscQueuePayloadTrialEndingSoon = {
   type: 'trialEndingSoon';

@@ -47,6 +47,13 @@ class CustomLogger implements Logger {
 
 export const TABLE_NAMES = {
   events: 'events',
+  // Read-side events source. When NEWTON_RESOLVE_PROFILE is enabled, analytics
+  // READ queries hit the `events_resolved` view (anonymous->identified profile
+  // resolution via the device_alias dictionary, see migration 16). The write/
+  // ingestion path always uses `events`. Flag off => identical to `events`, so
+  // swapping read sites to `eventsRead` is inert until the flag is flipped.
+  eventsRead:
+    process.env.NEWTON_RESOLVE_PROFILE === '1' ? 'events_resolved' : 'events',
   profiles: 'profiles',
   alias: 'profile_aliases',
   self_hosting: 'self_hosting',

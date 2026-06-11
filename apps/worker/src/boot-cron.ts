@@ -103,6 +103,16 @@ export async function bootCron() {
     });
   }
 
+  // Newton fork: discover shared-cookie -> uid links into profile_aliases.
+  // Gated so it only runs where we want resolution maintained.
+  if (process.env.NEWTON_PROFILE_ALIAS_DISCOVERY === '1') {
+    jobs.push({
+      name: 'profileAlias',
+      type: 'profileAlias',
+      pattern: '*/5 * * * *',
+    });
+  }
+
   logger.info('Updating cron jobs');
 
   const jobsToKeep = new Set(jobs.map((job) => job.type));

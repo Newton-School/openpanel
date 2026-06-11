@@ -8,6 +8,7 @@ import { jobdeleteProjects } from './cron.delete-projects';
 import { gscSyncAllJob } from './gsc';
 import { onboardingJob } from './cron.onboarding';
 import { ping } from './cron.ping';
+import { profileAliasDiscovery } from './cron.profile-alias';
 import { salt } from './cron.salt';
 import { insightsDailyJob } from './insights';
 
@@ -51,6 +52,9 @@ export async function cronJob(job: Job<CronQueuePayload>) {
     }
     case 'cohortRefresh': {
       return await cohortRefreshCronJob();
+    }
+    case 'profileAlias': {
+      return await profileAliasDiscovery();
     }
   }
 }

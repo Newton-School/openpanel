@@ -26,6 +26,7 @@ export * from './src/services/notification.service';
 export * from './src/services/organization.service';
 export * from './src/services/overview.service';
 export * from './src/services/pages.service';
+export * from './src/services/profile-resolution';
 export * from './src/services/profile.service';
 export * from './src/services/project.service';
 export * from './src/services/reference.service';
