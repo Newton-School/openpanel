@@ -89,7 +89,10 @@ async function getInfoFromSession({
       const data = getSafeJson<EventsQueuePayloadCreateSessionEnd>(
         (res?.[0]?.[1] as string) ?? ''
       );
-      if (data) {
+      // Ignore stale jobs whose sessionId is empty (created by the pre-fix code
+      // path) — fall through to a freshly-generated deterministic sessionId
+      // instead of inheriting the empty one.
+      if (data?.payload.sessionId) {
         return {
           deviceId: currentDeviceId,
           sessionId: data.payload.sessionId,
@@ -104,7 +107,7 @@ async function getInfoFromSession({
       const data = getSafeJson<EventsQueuePayloadCreateSessionEnd>(
         (res?.[1]?.[1] as string) ?? ''
       );
-      if (data) {
+      if (data?.payload.sessionId) {
         return {
           deviceId: previousDeviceId,
           sessionId: data.payload.sessionId,

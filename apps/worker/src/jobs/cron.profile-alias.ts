@@ -22,7 +22,10 @@ const MAX_CHUNKS_PER_RUN = 7; // catch up ~a week per 5-min tick, then steady st
 interface AliasRow {
   project_id: string;
   alias: string;
-  profile_id: string;
+  // argMax aliased to `uid` (not `profile_id`) to avoid shadowing the
+  // profile_id column referenced in WHERE — ClickHouse would otherwise reject
+  // it as "aggregate function in WHERE".
+  uid: string;
 }
 
 function projectFilter(): string {
@@ -68,7 +71,7 @@ export async function profileAliasDiscovery() {
       `SELECT
          project_id,
          properties['__deviceId'] AS alias,
-         argMax(profile_id, created_at) AS profile_id
+         argMax(profile_id, created_at) AS uid
        FROM events
        WHERE created_at >= ${sqlstring.escape(formatClickhouseDate(from))}
          AND created_at < ${sqlstring.escape(formatClickhouseDate(to))}
@@ -86,7 +89,7 @@ export async function profileAliasDiscovery() {
         table: 'profile_aliases',
         values: rows.map((r) => ({
           project_id: r.project_id,
-          profile_id: r.profile_id,
+          profile_id: r.uid,
           alias: r.alias,
           created_at: createdAt,
         })),
