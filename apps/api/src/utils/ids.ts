@@ -22,7 +22,17 @@ export async function getDeviceId({
   overrideDeviceId?: string;
 }) {
   if (overrideDeviceId) {
-    return { deviceId: overrideDeviceId, sessionId: '' };
+    // The client supplied its own device id (e.g. the shared `op_device_id`
+    // cookie). Resolve the session for THIS device id instead of bailing with
+    // an empty sessionId — otherwise every overridden event lands with
+    // session_id='' and the worker emits a fresh session_start per event,
+    // which breaks all session-backed queries (funnels, retention) and floods
+    // the table with spurious session_start rows.
+    return await getInfoFromSession({
+      projectId,
+      currentDeviceId: overrideDeviceId,
+      previousDeviceId: overrideDeviceId,
+    });
   }
 
   if (!ua) {
