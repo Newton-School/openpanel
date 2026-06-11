@@ -40,38 +40,38 @@ export function getProfileMetrics(profileId: string, projectId: string) {
     }
   >(`
     WITH lastSeen AS (
-      SELECT max(created_at) as lastSeen FROM ${TABLE_NAMES.events} WHERE profile_id = ${sqlstring.escape(profileId)} AND project_id = ${sqlstring.escape(projectId)}
+      SELECT max(created_at) as lastSeen FROM ${TABLE_NAMES.eventsRead} WHERE profile_id = ${sqlstring.escape(profileId)} AND project_id = ${sqlstring.escape(projectId)}
     ),
     firstSeen AS (
-      SELECT min(created_at) as firstSeen FROM ${TABLE_NAMES.events} WHERE profile_id = ${sqlstring.escape(profileId)} AND project_id = ${sqlstring.escape(projectId)}
+      SELECT min(created_at) as firstSeen FROM ${TABLE_NAMES.eventsRead} WHERE profile_id = ${sqlstring.escape(profileId)} AND project_id = ${sqlstring.escape(projectId)}
     ),
     screenViews AS (
-      SELECT count(*) as screenViews FROM ${TABLE_NAMES.events} WHERE name = 'screen_view' AND profile_id = ${sqlstring.escape(profileId)} AND project_id = ${sqlstring.escape(projectId)}
+      SELECT count(*) as screenViews FROM ${TABLE_NAMES.eventsRead} WHERE name = 'screen_view' AND profile_id = ${sqlstring.escape(profileId)} AND project_id = ${sqlstring.escape(projectId)}
     ),
     sessions AS (
-      SELECT count(*) as sessions FROM ${TABLE_NAMES.events} WHERE name = 'session_start' AND profile_id = ${sqlstring.escape(profileId)} AND project_id = ${sqlstring.escape(projectId)}
+      SELECT count(*) as sessions FROM ${TABLE_NAMES.eventsRead} WHERE name = 'session_start' AND profile_id = ${sqlstring.escape(profileId)} AND project_id = ${sqlstring.escape(projectId)}
     ),
     duration AS (
       SELECT 
         round(avg(duration) / 1000 / 60, 2) as durationAvg, 
         round(quantilesExactInclusive(0.9)(duration)[1] / 1000 / 60, 2) as durationP90 
-      FROM ${TABLE_NAMES.events} 
+      FROM ${TABLE_NAMES.eventsRead} 
       WHERE name = 'session_end' AND duration != 0 AND profile_id = ${sqlstring.escape(profileId)} AND project_id = ${sqlstring.escape(projectId)}
     ),
     totalEvents AS (
-      SELECT count(*) as totalEvents FROM ${TABLE_NAMES.events} WHERE profile_id = ${sqlstring.escape(profileId)} AND project_id = ${sqlstring.escape(projectId)}
+      SELECT count(*) as totalEvents FROM ${TABLE_NAMES.eventsRead} WHERE profile_id = ${sqlstring.escape(profileId)} AND project_id = ${sqlstring.escape(projectId)}
     ),
     uniqueDaysActive AS (
-      SELECT count(DISTINCT toDate(created_at)) as uniqueDaysActive FROM ${TABLE_NAMES.events} WHERE profile_id = ${sqlstring.escape(profileId)} AND project_id = ${sqlstring.escape(projectId)}
+      SELECT count(DISTINCT toDate(created_at)) as uniqueDaysActive FROM ${TABLE_NAMES.eventsRead} WHERE profile_id = ${sqlstring.escape(profileId)} AND project_id = ${sqlstring.escape(projectId)}
     ),
     bounceRate AS (
-      SELECT round(avg(properties['__bounce'] = '1') * 100, 4) as bounceRate FROM ${TABLE_NAMES.events} WHERE name = 'session_end' AND profile_id = ${sqlstring.escape(profileId)} AND project_id = ${sqlstring.escape(projectId)}
+      SELECT round(avg(properties['__bounce'] = '1') * 100, 4) as bounceRate FROM ${TABLE_NAMES.eventsRead} WHERE name = 'session_end' AND profile_id = ${sqlstring.escape(profileId)} AND project_id = ${sqlstring.escape(projectId)}
     ),
     avgEventsPerSession AS (
       SELECT round((SELECT totalEvents FROM totalEvents) / nullIf((SELECT sessions FROM sessions), 0), 2) as avgEventsPerSession
     ),
     conversionEvents AS (
-      SELECT count(*) as conversionEvents FROM ${TABLE_NAMES.events} WHERE name NOT IN ('screen_view', 'session_start', 'session_end') AND profile_id = ${sqlstring.escape(profileId)} AND project_id = ${sqlstring.escape(projectId)}
+      SELECT count(*) as conversionEvents FROM ${TABLE_NAMES.eventsRead} WHERE name NOT IN ('screen_view', 'session_start', 'session_end') AND profile_id = ${sqlstring.escape(profileId)} AND project_id = ${sqlstring.escape(projectId)}
     ),
     avgTimeBetweenSessions AS (
       SELECT 
@@ -81,7 +81,7 @@ export function getProfileMetrics(profileId: string, projectId: string) {
         END as avgTimeBetweenSessions
     ),
     revenue AS (
-      SELECT sum(revenue) as revenue FROM ${TABLE_NAMES.events} WHERE name = 'revenue' AND profile_id = ${sqlstring.escape(profileId)} AND project_id = ${sqlstring.escape(projectId)}
+      SELECT sum(revenue) as revenue FROM ${TABLE_NAMES.eventsRead} WHERE name = 'revenue' AND profile_id = ${sqlstring.escape(profileId)} AND project_id = ${sqlstring.escape(projectId)}
     )
     SELECT 
       (SELECT lastSeen FROM lastSeen) as lastSeen, 
@@ -384,7 +384,7 @@ export function findProfilesCore(
   if (input.inactiveDays !== undefined) {
     const days = Math.floor(input.inactiveDays);
     conditions.push(`id NOT IN (
-      SELECT DISTINCT profile_id FROM ${TABLE_NAMES.events}
+      SELECT DISTINCT profile_id FROM ${TABLE_NAMES.eventsRead}
       WHERE project_id = ${pid}
         AND profile_id != ''
         AND created_at >= now() - INTERVAL ${days} DAY
@@ -405,7 +405,7 @@ export function findProfilesCore(
 
   if (input.performedEvent) {
     conditions.push(`id IN (
-      SELECT DISTINCT profile_id FROM ${TABLE_NAMES.events}
+      SELECT DISTINCT profile_id FROM ${TABLE_NAMES.eventsRead}
       WHERE project_id = ${pid}
         AND name = ${sqlstring.escape(input.performedEvent)}
     )`);
@@ -442,7 +442,7 @@ export async function getProfileWithEvents(
     `),
     clix(ch)
       .select<IClickhouseEvent>([])
-      .from(TABLE_NAMES.events)
+      .from(TABLE_NAMES.eventsRead)
       .where('project_id', '=', projectId)
       .where('profile_id', '=', profileId)
       .orderBy('created_at', 'DESC')

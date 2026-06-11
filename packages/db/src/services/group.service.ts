@@ -267,7 +267,7 @@ export async function getGroupStats(
       g AS group_id,
       uniqExact(profile_id) AS member_count,
       max(created_at) AS last_active_at
-    FROM ${TABLE_NAMES.events}
+    FROM ${TABLE_NAMES.eventsRead}
     ARRAY JOIN groups AS g
     WHERE project_id = ${sqlstring.escape(projectId)}
       AND g IN (${groupIds.map((id) => sqlstring.escape(id)).join(',')})

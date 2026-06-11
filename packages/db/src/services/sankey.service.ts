@@ -80,7 +80,7 @@ export class SankeyService {
   ): ReturnType<typeof clix> {
     return clix(this.client, timezone)
       .select<{ session_id: string }>(['session_id'])
-      .from(TABLE_NAMES.events)
+      .from(TABLE_NAMES.eventsRead)
       .where('project_id', '=', projectId)
       .where('name', '=', event.name)
       .where('created_at', 'BETWEEN', [
@@ -382,7 +382,7 @@ export class SankeyService {
         'name as event_name',
         'created_at',
       ])
-      .from(TABLE_NAMES.events)
+      .from(TABLE_NAMES.eventsRead)
       .where('project_id', '=', projectId)
       .where('created_at', 'BETWEEN', [
         clix.datetime(startDate, 'toDateTime'),

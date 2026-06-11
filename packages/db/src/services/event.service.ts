@@ -471,6 +471,10 @@ export async function getEventList(options: GetEventListOptions) {
     dateIntervalInDays = 0.5,
   } = options;
   const { sb, getSql, join } = createSqlBuilder();
+  // Newton fork: read through the events_resolved view so a cookie's pre-login
+  // events resolve to the identified profile_id (anon -> identified). Inert
+  // unless NEWTON_RESOLVE_PROFILE=1 (eventsRead === events otherwise).
+  sb.from = `${TABLE_NAMES.eventsRead} e`;
 
   const MAX_DATE_INTERVAL_IN_DAYS = 365;
   // Cap the date interval to prevent infinity
@@ -604,12 +608,11 @@ export async function getEventList(options: GetEventListOptions) {
   }
 
   if (profileId) {
-    // Identity stitching: pull pre-identification anonymous events from devices
-    // this profile has used, plus the profile's own identified events.
-    // Anonymous events have profile_id = device_id (see event.service.ts:357);
-    // the guard prevents leaking another user's identified events when a
-    // device_id collides (NAT, shared UA, server-side senders).
-    sb.where.deviceId = `((device_id IN (SELECT device_id as did FROM ${TABLE_NAMES.events} WHERE project_id = ${sqlstring.escape(projectId)} AND device_id != '' AND profile_id = ${sqlstring.escape(profileId)} group by did) AND profile_id = device_id) OR profile_id = ${sqlstring.escape(profileId)})`;
+    // events_resolved (eventsRead) already maps a cookie's pre-login events to
+    // the uid, so a plain profile_id filter returns the profile's identified +
+    // resolved anonymous events. Replaces the old device_id stitch, which keyed
+    // on the collision-prone server device id (the source of cross-user bleed).
+    sb.where.profileId = `profile_id = ${sqlstring.escape(profileId)}`;
   }
 
   if (sessionId) {
@@ -695,6 +698,9 @@ export async function getEventsCount({
   endDate,
 }: Omit<GetEventListOptions, 'cursor' | 'take'>) {
   const { sb, getSql, join } = createSqlBuilder();
+  // Newton fork: match getEventList — resolve anon -> identified via the view
+  // so the count agrees with the list.
+  sb.from = `${TABLE_NAMES.eventsRead} e`;
   sb.where.projectId = `project_id = ${sqlstring.escape(projectId)}`;
   if (profileId) {
     sb.where.profileId = `profile_id = ${sqlstring.escape(profileId)}`;

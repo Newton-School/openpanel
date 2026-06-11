@@ -87,7 +87,10 @@ export class FunnelService {
           : []),
         ...additionalSelects,
       ])
-      .from(TABLE_NAMES.events, false)
+      // Newton fork: read from the resolution view so anonymous (pre-login)
+      // events fold into the identified profile for funnel grouping. Inert
+      // unless NEWTON_RESOLVE_PROFILE=1 (eventsRead === events otherwise).
+      .from(TABLE_NAMES.eventsRead, false)
       .where('project_id', '=', projectId)
       .where('created_at', 'BETWEEN', [
         clix.datetime(startDate, 'toDateTime'),

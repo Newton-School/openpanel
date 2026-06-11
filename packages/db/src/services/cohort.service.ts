@@ -646,7 +646,7 @@ export async function getCohortMemberEvents(
 ): Promise<{ name: string; count: number }[]> {
   return chQuery<{ name: string; count: number }>(`
     SELECT name, count() AS count
-    FROM ${TABLE_NAMES.events}
+    FROM ${TABLE_NAMES.eventsRead}
     WHERE project_id = ${sqlstring.escape(projectId)}
       AND profile_id IN (
         SELECT profile_id FROM ${TABLE_NAMES.cohort_members} FINAL
@@ -669,7 +669,7 @@ export async function getCohortEventsPerDay(
     SELECT
       toDate(created_at) AS date,
       count() AS count
-    FROM ${TABLE_NAMES.events}
+    FROM ${TABLE_NAMES.eventsRead}
     WHERE project_id = ${sqlstring.escape(projectId)}
       AND created_at >= toDate(now() - INTERVAL ${days} DAY)
       AND profile_id IN (
@@ -694,7 +694,7 @@ export async function getCohortMemberRoutes(
 ): Promise<{ path: string; count: number }[]> {
   return chQuery<{ path: string; count: number }>(`
     SELECT path, count() AS count
-    FROM ${TABLE_NAMES.events}
+    FROM ${TABLE_NAMES.eventsRead}
     WHERE project_id = ${sqlstring.escape(projectId)}
       AND profile_id IN (
         SELECT profile_id FROM ${TABLE_NAMES.cohort_members} FINAL

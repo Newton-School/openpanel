@@ -47,7 +47,7 @@ export class PagesService {
         'concat(origin, path) as page_key',
         "anyLast(properties['__title']) as title",
       ])
-      .from(TABLE_NAMES.events, false)
+      .from(TABLE_NAMES.eventsRead, false)
       .where('project_id', '=', projectId)
       .where('name', '=', 'screen_view')
       .where('created_at', '>=', clix.exp('now() - INTERVAL 30 DAY'))
@@ -62,7 +62,7 @@ export class PagesService {
         'origin',
         `dateDiff('millisecond', created_at, lead(created_at, 1, created_at) OVER (PARTITION BY session_id ORDER BY created_at)) AS duration`,
       ])
-      .from(TABLE_NAMES.events, false)
+      .from(TABLE_NAMES.eventsRead, false)
       .where('project_id', '=', projectId)
       .where('name', '=', 'screen_view')
       .where('path', '!=', '')
@@ -155,7 +155,7 @@ export class PagesService {
         'count() as pageviews',
         'uniq(e.session_id) as sessions',
       ])
-      .from(`${TABLE_NAMES.events} e`, false)
+      .from(`${TABLE_NAMES.eventsRead} e`, false)
       .where('e.project_id', '=', projectId)
       .where('e.name', '=', 'screen_view')
       .where('e.path', '!=', '')

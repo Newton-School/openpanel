@@ -229,7 +229,7 @@ export class OverviewService {
         `${clix.toStartOf('created_at', interval as any, timezone)} AS date`,
         'sum(revenue) AS total_revenue',
       ])
-      .from(TABLE_NAMES.events)
+      .from(TABLE_NAMES.eventsRead)
       .where('project_id', '=', projectId)
       .where('name', '=', 'revenue')
       .where('revenue', '>', 0)
@@ -448,7 +448,7 @@ export class OverviewService {
         `${clix.toStartOf('created_at', interval as any, timezone)} AS date`,
         `dateDiff('millisecond', created_at, lead(created_at, 1, created_at) OVER (PARTITION BY session_id ORDER BY created_at)) AS duration`,
       ])
-      .from(TABLE_NAMES.events)
+      .from(TABLE_NAMES.eventsRead)
       .where('project_id', '=', projectId)
       .where('name', '=', 'screen_view')
       .where('created_at', 'BETWEEN', [
@@ -490,7 +490,7 @@ export class OverviewService {
         'uniq(profile_id) AS unique_visitors',
         'uniq(session_id) AS total_sessions',
       ])
-      .from(TABLE_NAMES.events)
+      .from(TABLE_NAMES.eventsRead)
       .where('project_id', '=', projectId)
       .where('name', '=', 'screen_view')
       .where('created_at', 'BETWEEN', [
@@ -548,7 +548,7 @@ export class OverviewService {
         '(SELECT total_sessions FROM overall_unique_visitors) AS overall_total_sessions',
         '(SELECT bounce_rate FROM overall_bounce_rate) AS overall_bounce_rate',
       ])
-      .from(`${TABLE_NAMES.events} AS e`)
+      .from(`${TABLE_NAMES.eventsRead} AS e`)
       .leftJoin(
         'daily_session_stats AS dss',
         `${clix.toStartOf('e.created_at', interval as any)} = dss.date`
@@ -677,7 +677,7 @@ export class OverviewService {
         pageviews: number;
         revenue?: number;
       }>(selectColumns)
-      .from(TABLE_NAMES.events, false)
+      .from(TABLE_NAMES.eventsRead, false)
       .where('project_id', '=', projectId)
       .where('name', '=', 'screen_view')
       .where('path', '!=', '')
@@ -758,7 +758,7 @@ export class OverviewService {
   }) {
     return clix(this.client, timezone)
       .select(['DISTINCT session_id'])
-      .from(TABLE_NAMES.events)
+      .from(TABLE_NAMES.eventsRead)
       .where('project_id', '=', projectId)
       .where('created_at', 'BETWEEN', [
         clix.datetime(startDate, 'toDateTime'),
@@ -1025,7 +1025,7 @@ export class OverviewService {
         path: string;
         created_at: string;
       }>(['session_id', 'concat(origin, path) as path', 'created_at'])
-      .from(TABLE_NAMES.events)
+      .from(TABLE_NAMES.eventsRead)
       .where('project_id', '=', projectId)
       .where('name', '=', 'screen_view')
       .where('path', '!=', '')
@@ -1363,7 +1363,7 @@ export class OverviewService {
 
     const query = clix(this.client, timezone)
       .select<{ name: string; count: number }>(['name', 'count() as count'])
-      .from(TABLE_NAMES.events, false)
+      .from(TABLE_NAMES.eventsRead, false)
       .where('project_id', '=', projectId)
       .where('created_at', 'BETWEEN', [
         clix.datetime(startDate, 'toDateTime'),
@@ -1399,7 +1399,7 @@ export class OverviewService {
         `${hrefKey} as href`,
         'count() as count',
       ])
-      .from(TABLE_NAMES.events, false)
+      .from(TABLE_NAMES.eventsRead, false)
       .where('project_id', '=', projectId)
       .where('name', '=', 'link_out')
       .where('created_at', 'BETWEEN', [
@@ -1455,7 +1455,7 @@ export class OverviewService {
         "nullIf(city, '') as city",
         'uniq(session_id) as count',
       ])
-      .from(TABLE_NAMES.events, false)
+      .from(TABLE_NAMES.eventsRead, false)
       .where('project_id', '=', projectId)
       .where('created_at', 'BETWEEN', [
         clix.datetime(startDate, 'toDateTime'),
