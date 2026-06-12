@@ -153,7 +153,7 @@ export class ConversionService {
             ${conditionA},
             ${conditionB}
           ) as steps
-        FROM ${TABLE_NAMES.eventsRead}
+        FROM ${TABLE_NAMES.eventsRead} AS events
         ${profileJoin}
         ${groupJoin}
         ${cohortJoinsSql}

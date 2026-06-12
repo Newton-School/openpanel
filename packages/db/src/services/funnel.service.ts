@@ -90,7 +90,9 @@ export class FunnelService {
       // Newton fork: read from the resolution view so anonymous (pre-login)
       // events fold into the identified profile for funnel grouping. Inert
       // unless NEWTON_RESOLVE_PROFILE=1 (eventsRead === events otherwise).
-      .from(TABLE_NAMES.eventsRead, false)
+      // Must keep the `events` alias: funnel conditions, the name filter and
+      // the profile/cohort joins all qualify columns as `events.*`.
+      .from(`${TABLE_NAMES.eventsRead} AS events`, false)
       .where('project_id', '=', projectId)
       .where('created_at', 'BETWEEN', [
         clix.datetime(startDate, 'toDateTime'),
