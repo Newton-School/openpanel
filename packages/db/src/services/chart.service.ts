@@ -328,6 +328,20 @@ export async function getChartSql({
     breakdown.name.startsWith('group.')
   );
   const anyMetricOnGroup = !!event.property?.startsWith('group.');
+
+  // Newton fork: a chart filtered to a single profile (e.g. the profile page
+  // activity chart) must read RAW events, not events_resolved. On the view
+  // profile_id is a dictGet column, so `WHERE profile_id = X` can't use the
+  // profile_id bloom index and full-scans the table (the uniq() subquery read
+  // ~115M / 34s). Resolution is moot for one identity anyway. Non-profile charts
+  // keep the resolved view so anon+identified collapse into one unique user.
+  const isProfileFilteredChart = event.filters.some(
+    (filter) => filter.name === 'profile_id'
+  );
+  const chartEventsTable = isProfileFilteredChart
+    ? TABLE_NAMES.events
+    : TABLE_NAMES.eventsRead;
+
   const needsGroupArrayJoin =
     anyFilterOnGroup ||
     anyBreakdownOnGroup ||
@@ -528,7 +542,7 @@ export async function getChartSql({
 
   if (event.segment === 'one_event_per_user') {
     sb.from = `(
-      SELECT DISTINCT ON (profile_id) * from ${TABLE_NAMES.eventsRead} e ${getJoins()} WHERE ${join(
+      SELECT DISTINCT ON (profile_id) * from ${chartEventsTable} e ${getJoins()} WHERE ${join(
         sb.where,
         ' AND '
       )}
@@ -586,7 +600,7 @@ export async function getChartSql({
 
     addCte(
       '_uc',
-      `SELECT ${ucSelectParts.join(', ')} FROM ${TABLE_NAMES.eventsRead} e ${subqueryGroupJoins}${profilesJoinRef ? `${profilesJoinRef} ` : ''}${inlineCohortJoinsSql ? `${inlineCohortJoinsSql} ` : ''}${inlineAllCohortsJoin}${ucWhere} GROUP BY ${ucGroupByParts.join(', ')}`
+      `SELECT ${ucSelectParts.join(', ')} FROM ${chartEventsTable} e ${subqueryGroupJoins}${profilesJoinRef ? `${profilesJoinRef} ` : ''}${inlineCohortJoinsSql ? `${inlineCohortJoinsSql} ` : ''}${inlineAllCohortsJoin}${ucWhere} GROUP BY ${ucGroupByParts.join(', ')}`
     );
 
     const ucJoinConditions = breakdowns
@@ -613,7 +627,7 @@ export async function getChartSql({
 
     addCte(
       '_uc',
-      `SELECT uniq(profile_id) as total_count FROM ${TABLE_NAMES.eventsRead} e ${subqueryGroupJoins}${profilesJoinRef ? `${profilesJoinRef} ` : ''}${inlineCohortJoinsSql ? `${inlineCohortJoinsSql} ` : ''}${ucWhere}`
+      `SELECT uniq(profile_id) as total_count FROM ${chartEventsTable} e ${subqueryGroupJoins}${profilesJoinRef ? `${profilesJoinRef} ` : ''}${inlineCohortJoinsSql ? `${inlineCohortJoinsSql} ` : ''}${ucWhere}`
     );
 
     sb.select.total_unique_count =
@@ -689,6 +703,20 @@ export async function getAggregateChartSql({
     breakdown.name.startsWith('group.')
   );
   const anyMetricOnGroup = !!event.property?.startsWith('group.');
+
+  // Newton fork: a chart filtered to a single profile (e.g. the profile page
+  // activity chart) must read RAW events, not events_resolved. On the view
+  // profile_id is a dictGet column, so `WHERE profile_id = X` can't use the
+  // profile_id bloom index and full-scans the table (the uniq() subquery read
+  // ~115M / 34s). Resolution is moot for one identity anyway. Non-profile charts
+  // keep the resolved view so anon+identified collapse into one unique user.
+  const isProfileFilteredChart = event.filters.some(
+    (filter) => filter.name === 'profile_id'
+  );
+  const chartEventsTable = isProfileFilteredChart
+    ? TABLE_NAMES.events
+    : TABLE_NAMES.eventsRead;
+
   const needsGroupArrayJoin =
     anyFilterOnGroup ||
     anyBreakdownOnGroup ||
@@ -857,7 +885,7 @@ export async function getAggregateChartSql({
 
   if (event.segment === 'one_event_per_user') {
     sb.from = `(
-      SELECT DISTINCT ON (profile_id) * from ${TABLE_NAMES.eventsRead} e ${getJoins()} WHERE ${join(
+      SELECT DISTINCT ON (profile_id) * from ${chartEventsTable} e ${getJoins()} WHERE ${join(
         sb.where,
         ' AND '
       )}
