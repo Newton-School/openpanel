@@ -12,6 +12,7 @@ import type {
 import { cohortComputeQueue } from '@openpanel/queue';
 import { TABLE_NAMES, ch, chQuery } from '../clickhouse/client';
 import { db } from '../prisma-client';
+import { cohortMembersInClause } from './profile-resolution';
 import { getProfiles, type IServiceProfile } from './profile.service';
 
 export const COHORT_MATERIALIZE_LIMIT = 10000;
@@ -644,15 +645,15 @@ export async function getCohortMemberEvents(
   cohortId: string,
   limit = 10,
 ): Promise<{ name: string; count: number }[]> {
+  // Newton fork: raw events + cohort alias set-expansion. Filtering the resolved
+  // view by `profile_id IN (...)` defeats the profile_id index and full-scans the
+  // table (unbounded here). cohortMembersInClause matches members + their cookie
+  // aliases on raw events, so members' anonymous events are still counted.
   return chQuery<{ name: string; count: number }>(`
     SELECT name, count() AS count
-    FROM ${TABLE_NAMES.eventsRead}
+    FROM ${TABLE_NAMES.events}
     WHERE project_id = ${sqlstring.escape(projectId)}
-      AND profile_id IN (
-        SELECT profile_id FROM ${TABLE_NAMES.cohort_members} FINAL
-        WHERE cohort_id = ${sqlstring.escape(cohortId)}
-          AND project_id = ${sqlstring.escape(projectId)}
-      )
+      AND ${cohortMembersInClause('profile_id', projectId, cohortId)}
       AND name NOT IN ('screen_view', 'session_start', 'session_end')
     GROUP BY name
     ORDER BY count DESC
@@ -669,14 +670,10 @@ export async function getCohortEventsPerDay(
     SELECT
       toDate(created_at) AS date,
       count() AS count
-    FROM ${TABLE_NAMES.eventsRead}
+    FROM ${TABLE_NAMES.events}
     WHERE project_id = ${sqlstring.escape(projectId)}
       AND created_at >= toDate(now() - INTERVAL ${days} DAY)
-      AND profile_id IN (
-        SELECT profile_id FROM ${TABLE_NAMES.cohort_members} FINAL
-        WHERE cohort_id = ${sqlstring.escape(cohortId)}
-          AND project_id = ${sqlstring.escape(projectId)}
-      )
+      AND ${cohortMembersInClause('profile_id', projectId, cohortId)}
     GROUP BY date
     ORDER BY date ASC
     WITH FILL
@@ -694,13 +691,9 @@ export async function getCohortMemberRoutes(
 ): Promise<{ path: string; count: number }[]> {
   return chQuery<{ path: string; count: number }>(`
     SELECT path, count() AS count
-    FROM ${TABLE_NAMES.eventsRead}
+    FROM ${TABLE_NAMES.events}
     WHERE project_id = ${sqlstring.escape(projectId)}
-      AND profile_id IN (
-        SELECT profile_id FROM ${TABLE_NAMES.cohort_members} FINAL
-        WHERE cohort_id = ${sqlstring.escape(cohortId)}
-          AND project_id = ${sqlstring.escape(projectId)}
-      )
+      AND ${cohortMembersInClause('profile_id', projectId, cohortId)}
       AND name = 'screen_view'
       AND path != ''
     GROUP BY path
