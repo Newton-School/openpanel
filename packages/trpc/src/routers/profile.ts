@@ -9,8 +9,10 @@ import {
   getProfileById,
   getProfileList,
   getProfileListCount,
+  getProfileMatchIds,
   getProfileMetrics,
   getProfiles,
+  inLiterals,
 } from '@openpanel/db';
 
 import { createTRPCRouter, protectedProcedure } from '../trpc';
@@ -28,27 +30,43 @@ export const profileRouter = createTRPCRouter({
       return getProfileMetrics(profileId, projectId);
     }),
 
+  // Newton fork: the three per-profile widgets below match the profile's uid
+  // PLUS its resolved cookie aliases (constant IN-list) so anonymous pre-login
+  // events are included, and the constant set keeps the profile_id bloom index
+  // pruning (an IN-subquery or the events_resolved view would full-scan).
   activity: protectedProcedure
     .input(z.object({ profileId: z.string(), projectId: z.string() }))
     .query(async ({ input: { profileId, projectId } }) => {
+      const match = inLiterals(
+        'profile_id',
+        await getProfileMatchIds(projectId, profileId),
+      );
       return chQuery<{ count: number; date: string }>(
-        `SELECT count(*) as count, toStartOfDay(created_at) as date FROM ${TABLE_NAMES.events} WHERE project_id = ${sqlstring.escape(projectId)} and profile_id = ${sqlstring.escape(profileId)} GROUP BY date ORDER BY date DESC`,
+        `SELECT count(*) as count, toStartOfDay(created_at) as date FROM ${TABLE_NAMES.events} WHERE project_id = ${sqlstring.escape(projectId)} and ${match} GROUP BY date ORDER BY date DESC`,
       );
     }),
 
   mostEvents: protectedProcedure
     .input(z.object({ profileId: z.string(), projectId: z.string() }))
     .query(async ({ input: { profileId, projectId } }) => {
+      const match = inLiterals(
+        'profile_id',
+        await getProfileMatchIds(projectId, profileId),
+      );
       return chQuery<{ count: number; name: string }>(
-        `SELECT count(*) as count, name FROM ${TABLE_NAMES.events} WHERE name NOT IN ('screen_view', 'session_start', 'session_end') AND project_id = ${sqlstring.escape(projectId)} and profile_id = ${sqlstring.escape(profileId)} GROUP BY name ORDER BY count DESC`,
+        `SELECT count(*) as count, name FROM ${TABLE_NAMES.events} WHERE name NOT IN ('screen_view', 'session_start', 'session_end') AND project_id = ${sqlstring.escape(projectId)} and ${match} GROUP BY name ORDER BY count DESC`,
       );
     }),
 
   popularRoutes: protectedProcedure
     .input(z.object({ profileId: z.string(), projectId: z.string() }))
     .query(async ({ input: { profileId, projectId } }) => {
+      const match = inLiterals(
+        'profile_id',
+        await getProfileMatchIds(projectId, profileId),
+      );
       return chQuery<{ count: number; path: string }>(
-        `SELECT count(*) as count, path FROM ${TABLE_NAMES.events} WHERE name = 'screen_view' AND project_id = ${sqlstring.escape(projectId)} and profile_id = ${sqlstring.escape(profileId)} GROUP BY path ORDER BY count DESC LIMIT 10`,
+        `SELECT count(*) as count, path FROM ${TABLE_NAMES.events} WHERE name = 'screen_view' AND project_id = ${sqlstring.escape(projectId)} and ${match} GROUP BY path ORDER BY count DESC LIMIT 10`,
       );
     }),
 

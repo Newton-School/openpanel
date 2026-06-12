@@ -13,7 +13,11 @@ import {
   TABLE_NAMES,
 } from '../clickhouse/client';
 import { clix } from '../clickhouse/query-builder';
-import { profileIdInClause } from './profile-resolution';
+import {
+  getProfileMatchIds,
+  inLiterals,
+  profileIdInClause,
+} from './profile-resolution';
 import { createSqlBuilder } from '../sql-builder';
 import type { IClickhouseEvent } from './event.service';
 import type { IClickhouseSession } from './session.service';
@@ -33,80 +37,53 @@ export interface IProfileMetrics {
   avgTimeBetweenSessions: number;
   revenue: number;
 }
-export function getProfileMetrics(profileId: string, projectId: string) {
-  // Newton fork: read RAW events and match the profile's identified id + its
-  // resolved cookie aliases via set-expansion (profileIdInClause), instead of
-  // reading the events_resolved view and filtering `profile_id = X`. The view
-  // turns profile_id into a dictGet column, which defeats the profile_id index
-  // and full-scans the whole table on every one of these CTEs (this query took
-  // ~8 min / 1.6B rows read). The IN-set keeps the index AND still folds in the
-  // anonymous pre-login events. project_id is still constrained per CTE.
+export async function getProfileMetrics(profileId: string, projectId: string) {
+  // Newton fork: ONE scan over RAW events with conditional aggregates, matching
+  // the profile's identified id + its resolved cookie aliases as a CONSTANT
+  // IN-list (anon pre-login events fold in).
+  //
+  // Two prod-verified pitfalls shaped this:
+  //  - events_resolved + `profile_id = X` turns profile_id into a dictGet
+  //    column -> the bloom index can't prune -> full 163M-row scan per CTE.
+  //  - 13 CTEs each with an IN-SUBQUERY predicate re-scan independently (no
+  //    query-condition-cache sharing) -> ~13x the reads of the old `= X` shape.
+  // A single pass + literal IN-list avoids both: one scan, tightest bloom
+  // pruning. Derived metrics are computed from the aggregates in a wrapper
+  // SELECT, preserving the old per-CTE semantics (nullIf guards, defaults).
   const pid = sqlstring.escape(projectId);
-  const match = profileIdInClause('profile_id', projectId, profileId);
+  const match = inLiterals(
+    'profile_id',
+    await getProfileMatchIds(projectId, profileId)
+  );
   return chQuery<
     Omit<IProfileMetrics, 'lastSeen' | 'firstSeen'> & {
       lastSeen: string;
       firstSeen: string;
     }
   >(`
-    WITH lastSeen AS (
-      SELECT max(created_at) as lastSeen FROM ${TABLE_NAMES.events} WHERE ${match} AND project_id = ${pid}
-    ),
-    firstSeen AS (
-      SELECT min(created_at) as firstSeen FROM ${TABLE_NAMES.events} WHERE ${match} AND project_id = ${pid}
-    ),
-    screenViews AS (
-      SELECT count(*) as screenViews FROM ${TABLE_NAMES.events} WHERE name = 'screen_view' AND ${match} AND project_id = ${pid}
-    ),
-    sessions AS (
-      SELECT count(*) as sessions FROM ${TABLE_NAMES.events} WHERE name = 'session_start' AND ${match} AND project_id = ${pid}
-    ),
-    duration AS (
+    SELECT
+      *,
+      round(totalEvents / nullIf(sessions, 0), 2) as avgEventsPerSession,
+      CASE
+        WHEN sessions <= 1 THEN 0
+        ELSE round(dateDiff('second', firstSeen, lastSeen) / nullIf(sessions - 1, 0), 1)
+      END as avgTimeBetweenSessions
+    FROM (
       SELECT
-        round(avg(duration) / 1000 / 60, 2) as durationAvg,
-        round(quantilesExactInclusive(0.9)(duration)[1] / 1000 / 60, 2) as durationP90
+        max(created_at) as lastSeen,
+        min(created_at) as firstSeen,
+        countIf(name = 'screen_view') as screenViews,
+        countIf(name = 'session_start') as sessions,
+        round(avgIf(duration, name = 'session_end' AND duration != 0) / 1000 / 60, 2) as durationAvg,
+        round(quantilesExactInclusiveIf(0.9)(duration, name = 'session_end' AND duration != 0)[1] / 1000 / 60, 2) as durationP90,
+        count(*) as totalEvents,
+        count(DISTINCT toDate(created_at)) as uniqueDaysActive,
+        round(avgIf(properties['__bounce'] = '1', name = 'session_end') * 100, 4) as bounceRate,
+        countIf(name NOT IN ('screen_view', 'session_start', 'session_end')) as conversionEvents,
+        sumIf(revenue, name = 'revenue') as revenue
       FROM ${TABLE_NAMES.events}
-      WHERE name = 'session_end' AND duration != 0 AND ${match} AND project_id = ${pid}
-    ),
-    totalEvents AS (
-      SELECT count(*) as totalEvents FROM ${TABLE_NAMES.events} WHERE ${match} AND project_id = ${pid}
-    ),
-    uniqueDaysActive AS (
-      SELECT count(DISTINCT toDate(created_at)) as uniqueDaysActive FROM ${TABLE_NAMES.events} WHERE ${match} AND project_id = ${pid}
-    ),
-    bounceRate AS (
-      SELECT round(avg(properties['__bounce'] = '1') * 100, 4) as bounceRate FROM ${TABLE_NAMES.events} WHERE name = 'session_end' AND ${match} AND project_id = ${pid}
-    ),
-    avgEventsPerSession AS (
-      SELECT round((SELECT totalEvents FROM totalEvents) / nullIf((SELECT sessions FROM sessions), 0), 2) as avgEventsPerSession
-    ),
-    conversionEvents AS (
-      SELECT count(*) as conversionEvents FROM ${TABLE_NAMES.events} WHERE name NOT IN ('screen_view', 'session_start', 'session_end') AND ${match} AND project_id = ${pid}
-    ),
-    avgTimeBetweenSessions AS (
-      SELECT 
-        CASE 
-          WHEN (SELECT sessions FROM sessions) <= 1 THEN 0
-          ELSE round(dateDiff('second', (SELECT firstSeen FROM firstSeen), (SELECT lastSeen FROM lastSeen)) / nullIf((SELECT sessions FROM sessions) - 1, 0), 1)
-        END as avgTimeBetweenSessions
-    ),
-    revenue AS (
-      SELECT sum(revenue) as revenue FROM ${TABLE_NAMES.events} WHERE name = 'revenue' AND ${match} AND project_id = ${pid}
+      WHERE project_id = ${pid} AND ${match}
     )
-    SELECT 
-      (SELECT lastSeen FROM lastSeen) as lastSeen, 
-      (SELECT firstSeen FROM firstSeen) as firstSeen, 
-      (SELECT screenViews FROM screenViews) as screenViews, 
-      (SELECT sessions FROM sessions) as sessions, 
-      (SELECT durationAvg FROM duration) as durationAvg, 
-      (SELECT durationP90 FROM duration) as durationP90,
-      (SELECT totalEvents FROM totalEvents) as totalEvents,
-      (SELECT uniqueDaysActive FROM uniqueDaysActive) as uniqueDaysActive,
-      (SELECT bounceRate FROM bounceRate) as bounceRate,
-      (SELECT avgEventsPerSession FROM avgEventsPerSession) as avgEventsPerSession,
-      (SELECT conversionEvents FROM conversionEvents) as conversionEvents,
-      (SELECT avgTimeBetweenSessions FROM avgTimeBetweenSessions) as avgTimeBetweenSessions,
-      (SELECT revenue FROM revenue) as revenue
   `)
     .then((data) => data[0]!)
     .then((data) => {

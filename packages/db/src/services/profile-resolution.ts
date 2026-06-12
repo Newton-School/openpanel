@@ -17,7 +17,7 @@
  */
 
 import sqlstring from 'sqlstring';
-import { TABLE_NAMES } from '../clickhouse/client';
+import { chQuery, TABLE_NAMES } from '../clickhouse/client';
 
 export const IDENTITY_ID_LENGTH = 10;
 export const COOKIE_ID_LENGTH = 16;
@@ -73,6 +73,34 @@ export function profileIdInClause(
     SELECT alias FROM ${TABLE_NAMES.alias} FINAL
     WHERE project_id = ${pid} AND profile_id = ${uid}
   )`;
+}
+
+/**
+ * Literal-list variant of the set-expansion, for hot paths: fetch the alias
+ * literals once (a tiny indexed read of `profile_aliases`) and let callers
+ * embed a CONSTANT `IN (...)` in their events queries via inLiterals().
+ *
+ * Why prefer this over profileIdInClause's IN-subquery when a request runs
+ * SEVERAL events queries for the same profile (verified on prod):
+ *   1. The bloom index prunes a constant set the tightest.
+ *   2. Identical constant predicates share the query-condition cache across
+ *      queries/CTEs; an IN-subquery re-evaluates per query — the original
+ *      13-CTE getProfileMetrics paid ~13 scans instead of ~1 this way.
+ */
+export async function getProfileMatchIds(
+  projectId: string,
+  profileId: string
+): Promise<string[]> {
+  const rows = await chQuery<{ alias: string }>(
+    `SELECT alias FROM ${TABLE_NAMES.alias} FINAL
+     WHERE project_id = ${sqlstring.escape(projectId)}
+       AND profile_id = ${sqlstring.escape(profileId)}`
+  );
+  return [profileId, ...rows.map((r) => r.alias)];
+}
+
+export function inLiterals(column: string, ids: string[]): string {
+  return `${column} IN (${ids.map((id) => sqlstring.escape(id)).join(', ')})`;
 }
 
 /**
