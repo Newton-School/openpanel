@@ -17,6 +17,10 @@ import type { EventMeta, Prisma } from '../prisma-client';
 import { db } from '../prisma-client';
 import { createSqlBuilder, type SqlBuilderObject } from '../sql-builder';
 import { getEventFiltersWhereClause } from './chart.service';
+import {
+  cohortMembersInClause,
+  profileIdInClause,
+} from './profile-resolution';
 import type { IServiceProfile, IServiceUpsertProfile } from './profile.service';
 import {
   getProfileById,
@@ -471,10 +475,13 @@ export async function getEventList(options: GetEventListOptions) {
     dateIntervalInDays = 0.5,
   } = options;
   const { sb, getSql, join } = createSqlBuilder();
-  // Newton fork: read through the events_resolved view so a cookie's pre-login
-  // events resolve to the identified profile_id (anon -> identified). Inert
-  // unless NEWTON_RESOLVE_PROFILE=1 (eventsRead === events otherwise).
-  sb.from = `${TABLE_NAMES.eventsRead} e`;
+  // Newton fork: when filtering by a specific profile or cohort, read RAW events
+  // and fold in anonymous events via alias set-expansion (profileIdInClause /
+  // cohortMembersInClause below) — this keeps the profile_id index. Reading the
+  // events_resolved view here would turn profile_id into a dictGet column and
+  // full-scan the table (the profile panel hung). For the unfiltered/global
+  // stream we keep the resolved view so the displayed profile_id is canonical.
+  sb.from = `${profileId || cohortId ? TABLE_NAMES.events : TABLE_NAMES.eventsRead} e`;
 
   const MAX_DATE_INTERVAL_IN_DAYS = 365;
   // Cap the date interval to prevent infinity
@@ -608,11 +615,10 @@ export async function getEventList(options: GetEventListOptions) {
   }
 
   if (profileId) {
-    // events_resolved (eventsRead) already maps a cookie's pre-login events to
-    // the uid, so a plain profile_id filter returns the profile's identified +
-    // resolved anonymous events. Replaces the old device_id stitch, which keyed
-    // on the collision-prone server device id (the source of cross-user bleed).
-    sb.where.profileId = `profile_id = ${sqlstring.escape(profileId)}`;
+    // Raw events + alias set-expansion: matches the profile's identified id and
+    // its resolved cookie aliases, so the profile's identified + anonymous
+    // pre-login events are returned while the profile_id index stays usable.
+    sb.where.profileId = profileIdInClause('profile_id', projectId, profileId);
   }
 
   if (sessionId) {
@@ -624,7 +630,9 @@ export async function getEventList(options: GetEventListOptions) {
   }
 
   if (cohortId) {
-    sb.where.cohortId = `profile_id IN (SELECT profile_id FROM ${TABLE_NAMES.cohort_members} FINAL WHERE cohort_id = ${sqlstring.escape(cohortId)} AND project_id = ${sqlstring.escape(projectId)})`;
+    // Expand the cohort to its members' aliases too (raw events), so members'
+    // anonymous events are included without the per-row dictGet of the view.
+    sb.where.cohortId = cohortMembersInClause('profile_id', projectId, cohortId);
   }
 
   if (startDate && endDate) {
@@ -698,12 +706,13 @@ export async function getEventsCount({
   endDate,
 }: Omit<GetEventListOptions, 'cursor' | 'take'>) {
   const { sb, getSql, join } = createSqlBuilder();
-  // Newton fork: match getEventList — resolve anon -> identified via the view
-  // so the count agrees with the list.
-  sb.from = `${TABLE_NAMES.eventsRead} e`;
+  // Newton fork: mirror getEventList exactly so the count agrees with the list.
+  // Profile/cohort filtered => raw events + alias set-expansion (index-safe);
+  // otherwise the resolved view.
+  sb.from = `${profileId || cohortId ? TABLE_NAMES.events : TABLE_NAMES.eventsRead} e`;
   sb.where.projectId = `project_id = ${sqlstring.escape(projectId)}`;
   if (profileId) {
-    sb.where.profileId = `profile_id = ${sqlstring.escape(profileId)}`;
+    sb.where.profileId = profileIdInClause('profile_id', projectId, profileId);
   }
 
   if (groupId) {
@@ -711,7 +720,7 @@ export async function getEventsCount({
   }
 
   if (cohortId) {
-    sb.where.cohortId = `profile_id IN (SELECT profile_id FROM ${TABLE_NAMES.cohort_members} FINAL WHERE cohort_id = ${sqlstring.escape(cohortId)} AND project_id = ${sqlstring.escape(projectId)})`;
+    sb.where.cohortId = cohortMembersInClause('profile_id', projectId, cohortId);
   }
 
   if (startDate && endDate) {

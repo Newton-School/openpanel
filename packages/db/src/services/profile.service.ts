@@ -13,6 +13,7 @@ import {
   TABLE_NAMES,
 } from '../clickhouse/client';
 import { clix } from '../clickhouse/query-builder';
+import { profileIdInClause } from './profile-resolution';
 import { createSqlBuilder } from '../sql-builder';
 import type { IClickhouseEvent } from './event.service';
 import type { IClickhouseSession } from './session.service';
@@ -33,6 +34,15 @@ export interface IProfileMetrics {
   revenue: number;
 }
 export function getProfileMetrics(profileId: string, projectId: string) {
+  // Newton fork: read RAW events and match the profile's identified id + its
+  // resolved cookie aliases via set-expansion (profileIdInClause), instead of
+  // reading the events_resolved view and filtering `profile_id = X`. The view
+  // turns profile_id into a dictGet column, which defeats the profile_id index
+  // and full-scans the whole table on every one of these CTEs (this query took
+  // ~8 min / 1.6B rows read). The IN-set keeps the index AND still folds in the
+  // anonymous pre-login events. project_id is still constrained per CTE.
+  const pid = sqlstring.escape(projectId);
+  const match = profileIdInClause('profile_id', projectId, profileId);
   return chQuery<
     Omit<IProfileMetrics, 'lastSeen' | 'firstSeen'> & {
       lastSeen: string;
@@ -40,38 +50,38 @@ export function getProfileMetrics(profileId: string, projectId: string) {
     }
   >(`
     WITH lastSeen AS (
-      SELECT max(created_at) as lastSeen FROM ${TABLE_NAMES.eventsRead} WHERE profile_id = ${sqlstring.escape(profileId)} AND project_id = ${sqlstring.escape(projectId)}
+      SELECT max(created_at) as lastSeen FROM ${TABLE_NAMES.events} WHERE ${match} AND project_id = ${pid}
     ),
     firstSeen AS (
-      SELECT min(created_at) as firstSeen FROM ${TABLE_NAMES.eventsRead} WHERE profile_id = ${sqlstring.escape(profileId)} AND project_id = ${sqlstring.escape(projectId)}
+      SELECT min(created_at) as firstSeen FROM ${TABLE_NAMES.events} WHERE ${match} AND project_id = ${pid}
     ),
     screenViews AS (
-      SELECT count(*) as screenViews FROM ${TABLE_NAMES.eventsRead} WHERE name = 'screen_view' AND profile_id = ${sqlstring.escape(profileId)} AND project_id = ${sqlstring.escape(projectId)}
+      SELECT count(*) as screenViews FROM ${TABLE_NAMES.events} WHERE name = 'screen_view' AND ${match} AND project_id = ${pid}
     ),
     sessions AS (
-      SELECT count(*) as sessions FROM ${TABLE_NAMES.eventsRead} WHERE name = 'session_start' AND profile_id = ${sqlstring.escape(profileId)} AND project_id = ${sqlstring.escape(projectId)}
+      SELECT count(*) as sessions FROM ${TABLE_NAMES.events} WHERE name = 'session_start' AND ${match} AND project_id = ${pid}
     ),
     duration AS (
-      SELECT 
-        round(avg(duration) / 1000 / 60, 2) as durationAvg, 
-        round(quantilesExactInclusive(0.9)(duration)[1] / 1000 / 60, 2) as durationP90 
-      FROM ${TABLE_NAMES.eventsRead} 
-      WHERE name = 'session_end' AND duration != 0 AND profile_id = ${sqlstring.escape(profileId)} AND project_id = ${sqlstring.escape(projectId)}
+      SELECT
+        round(avg(duration) / 1000 / 60, 2) as durationAvg,
+        round(quantilesExactInclusive(0.9)(duration)[1] / 1000 / 60, 2) as durationP90
+      FROM ${TABLE_NAMES.events}
+      WHERE name = 'session_end' AND duration != 0 AND ${match} AND project_id = ${pid}
     ),
     totalEvents AS (
-      SELECT count(*) as totalEvents FROM ${TABLE_NAMES.eventsRead} WHERE profile_id = ${sqlstring.escape(profileId)} AND project_id = ${sqlstring.escape(projectId)}
+      SELECT count(*) as totalEvents FROM ${TABLE_NAMES.events} WHERE ${match} AND project_id = ${pid}
     ),
     uniqueDaysActive AS (
-      SELECT count(DISTINCT toDate(created_at)) as uniqueDaysActive FROM ${TABLE_NAMES.eventsRead} WHERE profile_id = ${sqlstring.escape(profileId)} AND project_id = ${sqlstring.escape(projectId)}
+      SELECT count(DISTINCT toDate(created_at)) as uniqueDaysActive FROM ${TABLE_NAMES.events} WHERE ${match} AND project_id = ${pid}
     ),
     bounceRate AS (
-      SELECT round(avg(properties['__bounce'] = '1') * 100, 4) as bounceRate FROM ${TABLE_NAMES.eventsRead} WHERE name = 'session_end' AND profile_id = ${sqlstring.escape(profileId)} AND project_id = ${sqlstring.escape(projectId)}
+      SELECT round(avg(properties['__bounce'] = '1') * 100, 4) as bounceRate FROM ${TABLE_NAMES.events} WHERE name = 'session_end' AND ${match} AND project_id = ${pid}
     ),
     avgEventsPerSession AS (
       SELECT round((SELECT totalEvents FROM totalEvents) / nullIf((SELECT sessions FROM sessions), 0), 2) as avgEventsPerSession
     ),
     conversionEvents AS (
-      SELECT count(*) as conversionEvents FROM ${TABLE_NAMES.eventsRead} WHERE name NOT IN ('screen_view', 'session_start', 'session_end') AND profile_id = ${sqlstring.escape(profileId)} AND project_id = ${sqlstring.escape(projectId)}
+      SELECT count(*) as conversionEvents FROM ${TABLE_NAMES.events} WHERE name NOT IN ('screen_view', 'session_start', 'session_end') AND ${match} AND project_id = ${pid}
     ),
     avgTimeBetweenSessions AS (
       SELECT 
@@ -81,7 +91,7 @@ export function getProfileMetrics(profileId: string, projectId: string) {
         END as avgTimeBetweenSessions
     ),
     revenue AS (
-      SELECT sum(revenue) as revenue FROM ${TABLE_NAMES.eventsRead} WHERE name = 'revenue' AND profile_id = ${sqlstring.escape(profileId)} AND project_id = ${sqlstring.escape(projectId)}
+      SELECT sum(revenue) as revenue FROM ${TABLE_NAMES.events} WHERE name = 'revenue' AND ${match} AND project_id = ${pid}
     )
     SELECT 
       (SELECT lastSeen FROM lastSeen) as lastSeen, 
@@ -442,9 +452,11 @@ export async function getProfileWithEvents(
     `),
     clix(ch)
       .select<IClickhouseEvent>([])
-      .from(TABLE_NAMES.eventsRead)
+      // Newton fork: raw events + alias set-expansion (keeps the profile_id
+      // index; the resolved view would full-scan here). See profileIdInClause.
+      .from(TABLE_NAMES.events)
       .where('project_id', '=', projectId)
-      .where('profile_id', '=', profileId)
+      .rawWhere(profileIdInClause('profile_id', projectId, profileId))
       .orderBy('created_at', 'DESC')
       .limit(eventLimit)
       .execute(),
