@@ -300,10 +300,20 @@ async function main() {
 
   if (!DRY_RUN && values.reset) {
     console.log(`[reset] ALTER TABLE ${TABLE_NAMES.events} DELETE WHERE ${rangeClause}`);
-    await ch.command({
-      query: `ALTER TABLE ${TABLE_NAMES.events} DELETE WHERE ${rangeClause}`,
-      clickhouse_settings: { mutations_sync: '2' },
-    });
+    try {
+      await ch.command({
+        query: `ALTER TABLE ${TABLE_NAMES.events} DELETE WHERE ${rangeClause}`,
+        clickhouse_settings: { mutations_sync: '1' },
+      });
+    } catch (e) {
+      // ClickHouse Cloud may return 341 UNFINISHED (a replica is momentarily inactive) —
+      // the mutation still completes asynchronously. The post-load [VERIFY] (ch_count ==
+      // written) is the backstop: any residual rows would surface as match=false.
+      const msg = (e as Error).message || '';
+      if (/UNFINISHED|\b341\b|finish asynchronously/i.test(msg)) {
+        console.log('[reset] mutation submitted async (replica inactive); continuing — [VERIFY] will confirm');
+      } else throw e;
+    }
   }
 
   let total = 0, resolved = 0, byEmail = 0, byUser = 0, anon = 0;
