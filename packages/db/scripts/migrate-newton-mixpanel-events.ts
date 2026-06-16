@@ -408,6 +408,7 @@ async function main() {
       const rows = await chQuery<{ sid: string }>(
         `SELECT DISTINCT properties['__source_insert_id'] AS sid FROM ${TABLE_NAMES.events} ` +
           `WHERE ${rangeClause} AND properties['__source_insert_id'] IN (${ids.map(quoteId).join(',')})`,
+        { max_query_size: '1000000000' }, // ZONE_CHUNK ids -> multi-MB IN list, far over the 256KB default
       );
       present = new Set(rows.map((r) => r.sid));
     }
