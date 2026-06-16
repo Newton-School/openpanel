@@ -27,7 +27,7 @@ import { readFile, readdir } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { parseArgs } from 'node:util';
 import { createGunzip } from 'node:zlib';
-import { TABLE_NAMES, ch, chQuery } from '../src/clickhouse/client';
+import { TABLE_NAMES, ch, chQuery, createClient } from '../src/clickhouse/client';
 
 const { values } = parseArgs({
   options: {
@@ -47,6 +47,9 @@ const { values } = parseArgs({
     'max-insert': { type: 'string' },
     xform: { type: 'boolean', default: false },
     shard: { type: 'string', default: '0/1' }, // "k/N": this pod handles lines where idx%N==k
+    resume: { type: 'boolean', default: false }, // resume a wedged month: skip committed rows, reconcile the boundary by __source_insert_id
+    'resume-safety': { type: 'string', default: '500000' }, // reconcile-zone half-width (>= concurrency*batch covers any out-of-order frontier hole)
+    'insert-timeout': { type: 'string', default: '120000' }, // hard per-insert deadline (ms); aborts a stalled insert instead of hanging
   },
   strict: true,
 });
@@ -66,6 +69,9 @@ const LIMIT = values.limit ? Number.parseInt(values.limit, 10) : Number.POSITIVE
 const MAX_INSERT = values['max-insert'] ? Number.parseInt(values['max-insert'], 10) : Number.POSITIVE_INFINITY;
 const XFORM = values.xform ?? false;
 const [SHARD_K, SHARD_N] = ((values.shard ?? '0/1').split('/').map(Number)) as [number, number];
+const RESUME = values.resume ?? false;
+const RESUME_SAFETY = Number.parseInt(values['resume-safety'] ?? '500000', 10);
+const INSERT_TIMEOUT_MS = Number.parseInt(values['insert-timeout'] ?? '120000', 10);
 
 if (!DIR || !MONTH || !PROJECT_ID || !values.identity) {
   console.error('required: --dir <events dir> --month YYYY-MM --identity <map.json> --project-id <id>');
@@ -104,6 +110,39 @@ const bucket = {
     }
   },
 };
+
+// ---- dedicated insert client --------------------------------------------
+// The shared `ch` proxy inserts with request_timeout=300s + wait_end_of_query=1 + progress
+// headers, so under parts-delay backpressure CH HOLDS the socket and the client never times
+// out -> the 15-min wedge that killed the first run. Here each insert gets a HARD AbortController
+// deadline (fires regardless of progress headers) and a bounded retry that THROWS on exhaustion,
+// so a stuck insert fails the job cleanly (backoffLimit 0 -> Failed, resumable) instead of hanging.
+const insertCh = createClient({
+  url: process.env.CLICKHOUSE_URL,
+  request_timeout: INSERT_TIMEOUT_MS,
+  max_open_connections: CONCURRENCY + 2,
+  keep_alive: { enabled: true, idle_socket_ttl: 30_000 },
+  compression: { request: true },
+});
+async function insertRows(rows: any[]): Promise<void> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), INSERT_TIMEOUT_MS);
+    try {
+      await insertCh.insert({
+        table: TABLE_NAMES.events, values: rows, format: 'JSONEachRow', abort_signal: ac.signal,
+        clickhouse_settings: {
+          max_insert_block_size: '500000', input_format_parallel_parsing: 1,
+          date_time_input_format: 'best_effort', wait_end_of_query: 1,
+        },
+      });
+      clearTimeout(timer);
+      return;
+    } catch (e) { clearTimeout(timer); lastErr = e; await sleep(500 * 2 ** attempt); }
+  }
+  throw lastErr;
+}
 
 // ---- identity resolution (email / username -> uid) ------------------------
 function resolveUid(props: Props, idmap: Map<string, string>): string {
@@ -318,8 +357,22 @@ async function main() {
     }
   }
 
+  // ---- resume: skip already-committed rows; reconcile the boundary by __source_insert_id ----
+  // committed rows == a dense prefix of `resolved` (the eligible-index) MINUS the <=CONCURRENCY
+  // hung frontier batches. So below (C - safety) is hole-free => skip; the (C-safety, C+safety]
+  // zone may contain frontier holes/dups => reconcile by insert_id; above C+safety is all new.
+  let resumeC = 0, skipBelow = -1, zoneHi = -1;
+  if (RESUME && !DRY_RUN) {
+    const r = await chQuery<{ c: string }>(`SELECT count() AS c FROM ${TABLE_NAMES.events} WHERE ${rangeClause}`);
+    resumeC = Number(r[0]?.c ?? 0);
+    skipBelow = resumeC - RESUME_SAFETY;
+    zoneHi = resumeC + RESUME_SAFETY;
+    console.log(`[resume] committed=${resumeC} safety=${RESUME_SAFETY} skip<=${skipBelow} reconcileZone=(${skipBelow}, ${zoneHi}]`);
+  }
+
   let total = 0, resolved = 0, byEmail = 0, byUser = 0, anon = 0;
   let afterCutoff = 0, droppedName = 0, parseErr = 0, xformErr = 0, written = 0, samples = 0;
+  let skippedCommitted = 0, zonePresent = 0, zoneInserted = 0, zoneNoIdSkip = 0, tailInserted = 0;
 
   const inflight = new Set<Promise<void>>();
   let batch: any[] = [];
@@ -330,8 +383,7 @@ async function main() {
     const rows = batch; batch = [];
     applyControl();
     await bucket.acquire(rows.length);
-    const p = ch
-      .insert({ table: TABLE_NAMES.events, values: rows, format: 'JSONEachRow' })
+    const p = insertRows(rows)
       .then(() => {
         written += rows.length;
         if (written % (BATCH * 20) < BATCH) {
@@ -341,6 +393,32 @@ async function main() {
       .finally(() => { inflight.delete(p); });
     inflight.add(p);
     if (inflight.size >= CONCURRENCY) await Promise.race(inflight);
+  }
+
+  // ---- reconcile-zone: insert only the rows whose __source_insert_id is NOT already in CH ----
+  const ZONE_CHUNK = 50_000;
+  let zoneBuf: { row: any; sid: string; below: boolean }[] = [];
+  const quoteId = (s: string) => `'${s.replace(/'/g, "''")}'`;
+  async function reconcileZone() {
+    if (zoneBuf.length === 0) return;
+    const chunk = zoneBuf; zoneBuf = [];
+    const ids = [...new Set(chunk.map((z) => z.sid).filter(Boolean))];
+    let present = new Set<string>();
+    if (ids.length) {
+      const rows = await chQuery<{ sid: string }>(
+        `SELECT DISTINCT properties['__source_insert_id'] AS sid FROM ${TABLE_NAMES.events} ` +
+          `WHERE ${rangeClause} AND properties['__source_insert_id'] IN (${ids.map(quoteId).join(',')})`,
+      );
+      present = new Set(rows.map((r) => r.sid));
+    }
+    for (const z of chunk) {
+      if (z.sid ? present.has(z.sid) : z.below) { // already committed -> skip (no dup)
+        if (z.sid) zonePresent++; else zoneNoIdSkip++;
+        continue;
+      }
+      batch.push(z.row); zoneInserted++;
+      if (batch.length >= BATCH) await flush();
+    }
   }
 
   if (SHARD_N > 1) console.log(`[shard] ${SHARD_K}/${SHARD_N} (this pod handles lines where idx%${SHARD_N}==${SHARD_K})`);
@@ -382,11 +460,21 @@ async function main() {
     }
 
     if (written >= MAX_INSERT) { rl.close(); break outer; }
-    try { batch.push(buildRow(D!, rec.event, props, uid, createdMs)); }
+    // resume: `resolved` is the eligible-index. Below the zone = already committed (skip);
+    // inside the zone = reconcile by insert_id; above = definitely new (insert directly).
+    if (RESUME && resolved <= skipBelow) { skippedCommitted++; continue; }
+    let row: any;
+    try { row = buildRow(D!, rec.event, props, uid, createdMs); }
     catch { xformErr++; continue; }
+    if (RESUME && resolved <= zoneHi) {
+      zoneBuf.push({ row, sid: row.properties.__source_insert_id ?? '', below: resolved <= resumeC });
+      if (zoneBuf.length >= ZONE_CHUNK) await reconcileZone();
+      continue;
+    }
+    batch.push(row); tailInserted++;
     if (batch.length >= BATCH) await flush();
   }
-  if (!DRY_RUN) { await flush(); await Promise.all(inflight); }
+  if (!DRY_RUN) { if (RESUME) await reconcileZone(); await flush(); await Promise.all(inflight); }
 
   // Integrity: CH rows in this chunk's range must equal what we wrote. Disjoint per month.
   // Skipped when sharded (each shard wrote only 1/N) — the orchestrator verifies the combined
@@ -396,7 +484,9 @@ async function main() {
       `SELECT count() AS c FROM ${TABLE_NAMES.events} WHERE ${rangeClause}`,
     );
     const chCount = Number(rows[0]?.c ?? 0);
-    console.log(`[VERIFY] month=${MONTH} ch_count=${chCount} written=${written} match=${chCount === written}`);
+    const expected = resolved - xformErr; // every eligible source row present exactly once
+    console.log(`[VERIFY] month=${MONTH} ch_count=${chCount} expected=${expected} written=${written} match=${chCount === expected}`);
+    if (RESUME) console.log(`[RESUME-STAT] committed_before=${resumeC} skipped=${skippedCommitted} zonePresent=${zonePresent} zoneNoIdSkip=${zoneNoIdSkip} zoneInserted=${zoneInserted} tailInserted=${tailInserted} new=${written}`);
     console.log(`[ROLLBACK] ALTER TABLE ${TABLE_NAMES.events} DELETE WHERE ${rangeClause}`);
   }
 
