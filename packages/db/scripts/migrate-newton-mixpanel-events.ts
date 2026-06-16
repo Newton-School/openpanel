@@ -27,7 +27,8 @@ import { readFile, readdir } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { parseArgs } from 'node:util';
 import { createGunzip } from 'node:zlib';
-import { TABLE_NAMES, ch, chQuery, createClient } from '../src/clickhouse/client';
+import { ClickHouseLogLevel } from '@clickhouse/client';
+import { TABLE_NAMES, ch, createClient } from '../src/clickhouse/client';
 
 const { values } = parseArgs({
   options: {
@@ -101,9 +102,10 @@ const bucket = {
     while (control.paused) await sleep(1000);
     const rate = control.rowsPerSec;
     if (!rate || rate <= 0) return;
+    const cap = Math.max(rate, n); // burst capacity >= one batch, else acquire(n>rate) loops forever
     for (;;) {
       const now = Date.now();
-      this.tokens = Math.min(rate, this.tokens + ((now - this.last) / 1000) * rate);
+      this.tokens = Math.min(cap, this.tokens + ((now - this.last) / 1000) * rate);
       this.last = now;
       if (this.tokens >= n) { this.tokens -= n; return; }
       await sleep(Math.min(1000, ((n - this.tokens) / rate) * 1000));
@@ -123,7 +125,20 @@ const insertCh = createClient({
   max_open_connections: CONCURRENCY + 2,
   keep_alive: { enabled: true, idle_socket_ttl: 30_000 },
   compression: { request: true },
+  log: { level: ClickHouseLogLevel.WARN }, // no per-insert DEBUG dumps
 });
+// Quiet client for count / reconcile / verify — the shared `ch` DEBUG-logs every query, and the
+// reconcile IN() list is multi-MB, so its query text floods the pod log and slows it down.
+const queryCh = createClient({
+  url: process.env.CLICKHOUSE_URL,
+  request_timeout: 120_000,
+  clickhouse_settings: { date_time_input_format: 'best_effort' },
+  log: { level: ClickHouseLogLevel.WARN },
+});
+async function q<T>(query: string, settings?: Record<string, unknown>): Promise<T[]> {
+  const r = await queryCh.query({ query, format: 'JSONEachRow', clickhouse_settings: settings as any });
+  return r.json<T>();
+}
 async function insertRows(rows: any[]): Promise<void> {
   let lastErr: unknown;
   for (let attempt = 0; attempt < 4; attempt++) {
@@ -363,7 +378,7 @@ async function main() {
   // zone may contain frontier holes/dups => reconcile by insert_id; above C+safety is all new.
   let resumeC = 0, skipBelow = -1, zoneHi = -1;
   if (RESUME && !DRY_RUN) {
-    const r = await chQuery<{ c: string }>(`SELECT count() AS c FROM ${TABLE_NAMES.events} WHERE ${rangeClause}`);
+    const r = await q<{ c: string }>(`SELECT count() AS c FROM ${TABLE_NAMES.events} WHERE ${rangeClause}`);
     resumeC = Number(r[0]?.c ?? 0);
     skipBelow = resumeC - RESUME_SAFETY;
     zoneHi = resumeC + RESUME_SAFETY;
@@ -405,7 +420,7 @@ async function main() {
     const ids = [...new Set(chunk.map((z) => z.sid).filter(Boolean))];
     let present = new Set<string>();
     if (ids.length) {
-      const rows = await chQuery<{ sid: string }>(
+      const rows = await q<{ sid: string }>(
         `SELECT DISTINCT properties['__source_insert_id'] AS sid FROM ${TABLE_NAMES.events} ` +
           `WHERE ${rangeClause} AND properties['__source_insert_id'] IN (${ids.map(quoteId).join(',')})`,
         { max_query_size: '1000000000' }, // ZONE_CHUNK ids -> multi-MB IN list, far over the 256KB default
@@ -481,7 +496,7 @@ async function main() {
   // Skipped when sharded (each shard wrote only 1/N) — the orchestrator verifies the combined
   // month (CH count(range) == sum of shards' written) after all shards finish.
   if (!DRY_RUN && SHARD_N <= 1) {
-    const rows = await chQuery<{ c: string }>(
+    const rows = await q<{ c: string }>(
       `SELECT count() AS c FROM ${TABLE_NAMES.events} WHERE ${rangeClause}`,
     );
     const chCount = Number(rows[0]?.c ?? 0);
