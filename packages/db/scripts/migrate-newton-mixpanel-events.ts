@@ -46,6 +46,7 @@ const { values } = parseArgs({
     limit: { type: 'string' },
     'max-insert': { type: 'string' },
     xform: { type: 'boolean', default: false },
+    shard: { type: 'string', default: '0/1' }, // "k/N": this pod handles lines where idx%N==k
   },
   strict: true,
 });
@@ -64,6 +65,7 @@ const SAMPLE = values.sample ? Number.parseInt(values.sample, 10) : 0;
 const LIMIT = values.limit ? Number.parseInt(values.limit, 10) : Number.POSITIVE_INFINITY;
 const MAX_INSERT = values['max-insert'] ? Number.parseInt(values['max-insert'], 10) : Number.POSITIVE_INFINITY;
 const XFORM = values.xform ?? false;
+const [SHARD_K, SHARD_N] = ((values.shard ?? '0/1').split('/').map(Number)) as [number, number];
 
 if (!DIR || !MONTH || !PROJECT_ID || !values.identity) {
   console.error('required: --dir <events dir> --month YYYY-MM --identity <map.json> --project-id <id>');
@@ -298,7 +300,7 @@ async function main() {
     `project_id = '${PROJECT_ID}' AND created_at >= '${rangeStart}' AND created_at < '${rangeEnd}' AND imported_at IS NOT NULL`;
   console.log(`[range] created_at [${rangeStart}, ${rangeEnd})  (rollback/integrity scope)`);
 
-  if (!DRY_RUN && values.reset) {
+  if (!DRY_RUN && values.reset && SHARD_K === 0) { // only one shard resets the shared range
     console.log(`[reset] ALTER TABLE ${TABLE_NAMES.events} DELETE WHERE ${rangeClause}`);
     try {
       await ch.command({
@@ -341,8 +343,12 @@ async function main() {
     if (inflight.size >= CONCURRENCY) await Promise.race(inflight);
   }
 
+  if (SHARD_N > 1) console.log(`[shard] ${SHARD_K}/${SHARD_N} (this pod handles lines where idx%${SHARD_N}==${SHARD_K})`);
   const rl = createInterface({ input: createReadStream(file).pipe(createGunzip()), crlfDelay: Number.POSITIVE_INFINITY });
+  let lineIdx = -1;
   outer: for await (const line of rl) {
+    lineIdx++;
+    if (SHARD_N > 1 && lineIdx % SHARD_N !== SHARD_K) continue; // not this shard's line (uniform across shards)
     if (!line) continue;
     if (total >= LIMIT) break;
     total++;
@@ -383,7 +389,9 @@ async function main() {
   if (!DRY_RUN) { await flush(); await Promise.all(inflight); }
 
   // Integrity: CH rows in this chunk's range must equal what we wrote. Disjoint per month.
-  if (!DRY_RUN) {
+  // Skipped when sharded (each shard wrote only 1/N) — the orchestrator verifies the combined
+  // month (CH count(range) == sum of shards' written) after all shards finish.
+  if (!DRY_RUN && SHARD_N <= 1) {
     const rows = await chQuery<{ c: string }>(
       `SELECT count() AS c FROM ${TABLE_NAMES.events} WHERE ${rangeClause}`,
     );
