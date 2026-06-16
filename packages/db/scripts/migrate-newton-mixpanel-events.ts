@@ -27,7 +27,7 @@ import { readFile, readdir } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { parseArgs } from 'node:util';
 import { createGunzip } from 'node:zlib';
-import { TABLE_NAMES, ch } from '../src/clickhouse/client';
+import { TABLE_NAMES, ch, chQuery } from '../src/clickhouse/client';
 
 const { values } = parseArgs({
   options: {
@@ -40,7 +40,7 @@ const { values } = parseArgs({
     batch: { type: 'string', default: '5000' },
     concurrency: { type: 'string', default: '8' },
     control: { type: 'string' },
-    'drop-partition': { type: 'boolean', default: false },
+    reset: { type: 'boolean', default: false }, // ALTER DELETE this month's range before load (clean redo)
     'dry-run': { type: 'boolean', default: false },
     sample: { type: 'string' },
     limit: { type: 'string' },
@@ -285,10 +285,25 @@ async function main() {
 
   const D = !DRY_RUN || XFORM ? await loadDeps() : null;
 
-  if (!DRY_RUN && values['drop-partition']) {
-    const part = MONTH!.replace('-', '');
-    console.log(`[drop] ALTER TABLE ${TABLE_NAMES.events} DROP PARTITION '${part}'`);
-    await ch.command({ query: `ALTER TABLE ${TABLE_NAMES.events} DROP PARTITION '${part}'` });
+  // This chunk's UTC created_at range = [MONTH-01 IST, nextMonth-01 IST) shifted to UTC,
+  // capped at the cutoff. Disjoint per month (partitions DON'T align 1:1 due to the IST->UTC
+  // shift), so this range is the clean identifier for integrity + rollback.
+  const [yy, mm] = MONTH!.split('-').map(Number) as [number, number];
+  const nextMonth = mm === 12 ? `${yy + 1}-01` : `${yy}-${String(mm + 1).padStart(2, '0')}`;
+  const rangeStartMs = Date.parse(`${MONTH}-01T00:00:00Z`) - TZ_SHIFT_MS;
+  const rangeEndMs = Math.min(Date.parse(`${nextMonth}-01T00:00:00Z`) - TZ_SHIFT_MS, CUTOFF_MS);
+  const rangeStart = fmtCH(rangeStartMs);
+  const rangeEnd = fmtCH(rangeEndMs);
+  const rangeClause =
+    `project_id = '${PROJECT_ID}' AND created_at >= '${rangeStart}' AND created_at < '${rangeEnd}' AND imported_at IS NOT NULL`;
+  console.log(`[range] created_at [${rangeStart}, ${rangeEnd})  (rollback/integrity scope)`);
+
+  if (!DRY_RUN && values.reset) {
+    console.log(`[reset] ALTER TABLE ${TABLE_NAMES.events} DELETE WHERE ${rangeClause}`);
+    await ch.command({
+      query: `ALTER TABLE ${TABLE_NAMES.events} DELETE WHERE ${rangeClause}`,
+      clickhouse_settings: { mutations_sync: '2' },
+    });
   }
 
   let total = 0, resolved = 0, byEmail = 0, byUser = 0, anon = 0;
@@ -356,6 +371,16 @@ async function main() {
     if (batch.length >= BATCH) await flush();
   }
   if (!DRY_RUN) { await flush(); await Promise.all(inflight); }
+
+  // Integrity: CH rows in this chunk's range must equal what we wrote. Disjoint per month.
+  if (!DRY_RUN) {
+    const rows = await chQuery<{ c: string }>(
+      `SELECT count() AS c FROM ${TABLE_NAMES.events} WHERE ${rangeClause}`,
+    );
+    const chCount = Number(rows[0]?.c ?? 0);
+    console.log(`[VERIFY] month=${MONTH} ch_count=${chCount} written=${written} match=${chCount === written}`);
+    console.log(`[ROLLBACK] ALTER TABLE ${TABLE_NAMES.events} DELETE WHERE ${rangeClause}`);
+  }
 
   console.log(
     `[DONE] month=${MONTH} total=${total} resolved=${resolved} (byEmail=${byEmail} byUser=${byUser}) ` +
