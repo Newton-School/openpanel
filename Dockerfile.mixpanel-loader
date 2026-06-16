@@ -34,7 +34,7 @@ RUN cd /src && \
 # there is no build step). Cached unless a package.json / lockfile changes.
 FROM base AS final
 COPY --from=manifests /app ./
-RUN pnpm install --filter "@openpanel/db..." --frozen-lockfile
+RUN pnpm install --filter "@openpanel/db..." --filter "@openpanel/importer..." --frozen-lockfile
 
 # Source last: a tiny layer that's the only thing re-pushed on a code change.
 COPY . .
