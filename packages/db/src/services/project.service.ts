@@ -93,8 +93,19 @@ export async function getProjects({
 }
 
 export const getProjectEventsCount = async (projectId: string) => {
+  // Newton: `name NOT IN (...)` is a negation, so it can't use idx_name and this
+  // full-scanned the whole project on every sessions-job fire (~2.9B rows after the
+  // Mixpanel import). distinct_event_names_mv already holds `count() AS event_count`
+  // per (project_id, name), so summing it returns the same total from a tiny pre-aggregate.
+  // biome-ignore lint/correctness/noConstantCondition: original full-scan kept (disabled) for easy revert
+  if (false) {
+    const res = await chQuery<{ count: number }>(
+      `SELECT count(*) as count FROM ${TABLE_NAMES.events} WHERE project_id = ${sqlstring.escape(projectId)} AND name NOT IN ('session_start', 'session_end')`
+    );
+    return res[0]?.count;
+  }
   const res = await chQuery<{ count: number }>(
-    `SELECT count(*) as count FROM ${TABLE_NAMES.events} WHERE project_id = ${sqlstring.escape(projectId)} AND name NOT IN ('session_start', 'session_end')`
+    `SELECT sum(event_count) as count FROM ${TABLE_NAMES.event_names_mv} WHERE project_id = ${sqlstring.escape(projectId)} AND name NOT IN ('session_start', 'session_end')`
   );
   return res[0]?.count;
 };
