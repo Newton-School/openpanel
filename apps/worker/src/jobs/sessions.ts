@@ -41,8 +41,14 @@ const updateEventsCount = cacheable(async function updateEventsCount(
     return;
   }
 
-  const organizationEventsCount =
-    await getOrganizationBillingEventsCount(organization);
+  // Newton: billing/usage tracking disabled for self-hosted personal use — getOrganization
+  // BillingEventsCount full-scans events for the subscription period on every fire and we
+  // don't bill. Project eventsCount is kept (now a cheap distinct_event_names_mv pre-agg read).
+  // biome-ignore lint/correctness/noConstantCondition: feature flag, original path preserved
+  const BILLING_ENABLED = false;
+  const organizationEventsCount = BILLING_ENABLED
+    ? await getOrganizationBillingEventsCount(organization)
+    : 0;
   const projectEventsCount = await getProjectEventsCount(projectId);
 
   if (projectEventsCount) {
@@ -56,7 +62,7 @@ const updateEventsCount = cacheable(async function updateEventsCount(
     });
   }
 
-  if (organizationEventsCount) {
+  if (BILLING_ENABLED && organizationEventsCount) {
     await db.organization.update({
       where: {
         id: organization.id,
