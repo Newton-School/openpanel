@@ -357,16 +357,21 @@ async function main() {
 
   // This chunk's UTC created_at range = [MONTH-01 IST, nextMonth-01 IST) shifted to UTC,
   // capped at the cutoff. Disjoint per month (partitions DON'T align 1:1 due to the IST->UTC
-  // shift), so this range is the clean identifier for integrity + rollback.
-  const [yy, mm] = MONTH!.split('-').map(Number) as [number, number];
-  const nextMonth = mm === 12 ? `${yy + 1}-01` : `${yy}-${String(mm + 1).padStart(2, '0')}`;
-  const rangeStartMs = Date.parse(`${MONTH}-01T00:00:00Z`) - TZ_SHIFT_MS;
-  const rangeEndMs = Math.min(Date.parse(`${nextMonth}-01T00:00:00Z`) - TZ_SHIFT_MS, CUTOFF_MS);
-  const rangeStart = fmtCH(rangeStartMs);
-  const rangeEnd = fmtCH(rangeEndMs);
-  const rangeClause =
-    `project_id = '${PROJECT_ID}' AND created_at >= '${rangeStart}' AND created_at < '${rangeEnd}' AND imported_at IS NOT NULL`;
-  console.log(`[range] created_at [${rangeStart}, ${rangeEnd})  (rollback/integrity scope)`);
+  // shift), so this range is the clean identifier for integrity + rollback. Only the insert
+  // path uses it; emit modes early-return before any of that and may carry a non-month --month
+  // label (e.g. "2026-06a"), so skip the parse entirely for them.
+  let rangeStart = '', rangeEnd = '', rangeClause = '';
+  if (!EMIT_ANON && !EMIT_WINDOW) {
+    const [yy, mm] = MONTH!.split('-').map(Number) as [number, number];
+    const nextMonth = mm === 12 ? `${yy + 1}-01` : `${yy}-${String(mm + 1).padStart(2, '0')}`;
+    const rangeStartMs = Date.parse(`${MONTH}-01T00:00:00Z`) - TZ_SHIFT_MS;
+    const rangeEndMs = Math.min(Date.parse(`${nextMonth}-01T00:00:00Z`) - TZ_SHIFT_MS, CUTOFF_MS);
+    rangeStart = fmtCH(rangeStartMs);
+    rangeEnd = fmtCH(rangeEndMs);
+    rangeClause =
+      `project_id = '${PROJECT_ID}' AND created_at >= '${rangeStart}' AND created_at < '${rangeEnd}' AND imported_at IS NOT NULL`;
+    console.log(`[range] created_at [${rangeStart}, ${rangeEnd})  (rollback/integrity scope)`);
+  }
 
   if (!DRY_RUN && values.reset && SHARD_K === 0) { // only one shard resets the shared range
     console.log(`[reset] ALTER TABLE ${TABLE_NAMES.events} DELETE WHERE ${rangeClause}`);
