@@ -98,6 +98,12 @@ async function main() {
   let batch: any[] = [];
   const inflight = new Set<Promise<void>>();
 
+  // Dry-run doubles as the pre-push analysis (over UNIQUE events only): distinct anon
+  // profiles (= how many profile rows Phase C will create), event-name mix, and date span.
+  const profiles = DRY_RUN ? new Set<string>() : null;
+  const evNames = DRY_RUN ? new Map<string, number>() : null;
+  let minTs = '9999', maxTs = '0';
+
   async function flush() {
     if (batch.length === 0) return;
     const rows = batch; batch = [];
@@ -126,6 +132,13 @@ async function main() {
       if (seen.has(k)) { dup++; continue; }
       seen.add(k);
       unique++;
+      if (DRY_RUN) {
+        if (row.profile_id) profiles!.add(row.profile_id);
+        evNames!.set(row.name, (evNames!.get(row.name) ?? 0) + 1);
+        const ts = row.created_at as string;
+        if (ts && ts < minTs) minTs = ts;
+        if (ts && ts > maxTs) maxTs = ts;
+      }
       batch.push(row);
       if (batch.length >= BATCH) await flush();
     }
@@ -137,6 +150,13 @@ async function main() {
 
   console.log(`[DONE anon-insert] total=${total} unique=${unique} dup=${dup} written=${written} ` +
     `parseErr=${parseErr} wrongProject=${wrongProject} dedupRatio=${total ? (total / Math.max(unique, 1)).toFixed(2) : 0}`);
+
+  if (DRY_RUN && profiles && evNames) {
+    const top = [...evNames.entries()].sort((a, b) => b[1] - a[1]).slice(0, 20);
+    console.log(`[ANALYSIS] distinctAnonProfiles=${profiles.size} dateSpan=[${minTs} .. ${maxTs}] distinctEventNames=${evNames.size}`);
+    console.log('[ANALYSIS] top20 event names (by unique-event count):');
+    for (const [name, c] of top) console.log(`    ${c}\t${name}`);
+  }
 }
 
 main().then(() => process.exit(0)).catch((err) => { console.error(err); process.exit(1); });
