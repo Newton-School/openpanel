@@ -445,11 +445,13 @@ async function main() {
   if (SHARD_N > 1) console.log(`[shard] ${SHARD_K}/${SHARD_N} (this pod handles lines where idx%${SHARD_N}==${SHARD_K})`);
   // ---- EMIT-ANON (filter mode): write UNRESOLVED events as anon rows to --out (gz), no CH insert ----
   let anonGz: ReturnType<typeof createGzip> | null = null;
+  let anonOut: ReturnType<typeof createWriteStream> | null = null;
   let anonEmitted = 0, anonResolvedSkip = 0, anonNoKey = 0;
   if (EMIT_ANON) {
     if (!OUT) { console.error('--emit-anon requires --out'); process.exit(1); }
     anonGz = createGzip();
-    anonGz.pipe(createWriteStream(OUT));
+    anonOut = createWriteStream(OUT);
+    anonGz.pipe(anonOut);
   }
   const rl = createInterface({ input: createReadStream(file).pipe(createGunzip()), crlfDelay: Number.POSITIVE_INFINITY });
   let lineIdx = -1;
@@ -522,7 +524,7 @@ async function main() {
   }
   if (EMIT_ANON) {
     anonGz!.end();
-    await once(anonGz!, 'finish');
+    await once(anonOut!, 'close'); // wait for the FILE stream to fully flush+close, not just gzip's finish
     console.log(`[DONE emit-anon] month=${MONTH} total=${total} emitted=${anonEmitted} resolvedSkip=${anonResolvedSkip} noKey=${anonNoKey} afterCutoff=${afterCutoff} droppedName=${droppedName} xformErr=${xformErr}`);
     return;
   }
