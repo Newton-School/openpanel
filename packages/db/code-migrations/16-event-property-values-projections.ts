@@ -62,20 +62,6 @@ async function resolveStorageTable(isClustered: boolean): Promise<string> {
   return rows[0].t;
 }
 
-async function projectionHasParts(
-  storage: string,
-  projection: string,
-): Promise<boolean> {
-  const rows = await jsonRows<{ c: string }>(
-    `SELECT count() AS c FROM system.projection_parts
-     WHERE database = currentDatabase()
-       AND table = '${storage.replace(/'/g, "''")}'
-       AND name = '${projection}'
-       AND active`,
-  );
-  return Number(rows[0]?.c ?? 0) > 0;
-}
-
 export async function up() {
   const isClustered = getIsCluster();
   const storage = await resolveStorageTable(isClustered);
@@ -88,6 +74,16 @@ export async function up() {
       (p) =>
         `ALTER TABLE ${tbl}${onCluster} ADD PROJECTION IF NOT EXISTS ${p.name} (${p.def})`,
     ),
+    // Backfill existing parts. Unconditional MATERIALIZE: the migration user
+    // (openpanel_writer) has ALTER but NOT SELECT on system.projection_parts, so we
+    // can't read it to guard. MATERIALIZE is idempotent — it submits an async mutation
+    // (does not block the migration) that recomputes the same projection data, and it's
+    // instant on a fresh/empty MV. Where the projection is already materialized (e.g. a
+    // hand-applied prod), the env's codeMigration record should mark this applied so it's
+    // skipped instead of needlessly recomputing.
+    ...PROJECTIONS.map(
+      (p) => `ALTER TABLE ${tbl}${onCluster} MATERIALIZE PROJECTION ${p.name}`,
+    ),
   ];
 
   if (process.argv.includes('--dry')) {
@@ -96,18 +92,6 @@ export async function up() {
   }
 
   await runClickhouseMigrationCommands(ddl);
-
-  // Backfill the projections into existing parts. Guarded so we don't re-scan
-  // 1.57B rows where the projection is already materialized.
-  for (const p of PROJECTIONS) {
-    if (await projectionHasParts(storage, p.name)) {
-      console.log(`[16] projection ${p.name} already materialized — skipping`);
-      continue;
-    }
-    await runClickhouseMigrationCommands([
-      `ALTER TABLE ${tbl}${onCluster} MATERIALIZE PROJECTION ${p.name}`,
-    ]);
-  }
 }
 
 export async function down() {
