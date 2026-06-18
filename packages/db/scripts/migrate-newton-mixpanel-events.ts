@@ -53,7 +53,10 @@ const { values } = parseArgs({
     'resume-safety': { type: 'string', default: '500000' }, // reconcile-zone half-width (>= concurrency*batch covers any out-of-order frontier hole)
     'insert-timeout': { type: 'string', default: '120000' }, // hard per-insert deadline (ms); aborts a stalled insert instead of hanging
     'emit-anon': { type: 'boolean', default: false }, // FILTER mode: write UNRESOLVED (anon) events as anon rows to --out (no CH insert)
-    out: { type: 'string' }, // --emit-anon output path (gzipped JSONL of CH-ready anon rows)
+    'emit-window': { type: 'boolean', default: false }, // FILTER mode: write IDENTIFIED events in [window-start,window-end) to --out (no CH insert)
+    'window-start': { type: 'string' }, // inclusive lower bound for --emit-window (UTC ISO)
+    'window-end': { type: 'string' }, //   exclusive upper bound for --emit-window (UTC ISO)
+    out: { type: 'string' }, // --emit-anon / --emit-window output path (gzipped JSONL of CH-ready rows)
   },
   strict: true,
 });
@@ -77,6 +80,9 @@ const RESUME = values.resume ?? false;
 const RESUME_SAFETY = Number.parseInt(values['resume-safety'] ?? '500000', 10);
 const INSERT_TIMEOUT_MS = Number.parseInt(values['insert-timeout'] ?? '120000', 10);
 const EMIT_ANON = values['emit-anon'] ?? false;
+const EMIT_WINDOW = values['emit-window'] ?? false;
+const WINDOW_START_MS = values['window-start'] ? Date.parse(values['window-start']) : Number.NaN;
+const WINDOW_END_MS = values['window-end'] ? Date.parse(values['window-end']) : Number.NaN;
 const OUT = values.out;
 
 if (!DIR || !MONTH || !PROJECT_ID || !values.identity) {
@@ -336,9 +342,12 @@ async function main() {
   );
   console.log(`[identity] ${idmap.size} keys`);
 
-  const files = (await readdir(DIR!)).filter((f) => f.startsWith(`${MONTH}-01_`) && f.endsWith('.jsonl.gz'));
+  // --emit-window spans non-month-aligned chunks (e.g. the June sub-chunks), so it takes whatever
+  // single chunk file the job synced into DIR; the [window-start,window-end) filter does the bounding.
+  const files = (await readdir(DIR!)).filter((f) =>
+    EMIT_WINDOW ? f.endsWith('.jsonl.gz') : (f.startsWith(`${MONTH}-01_`) && f.endsWith('.jsonl.gz')));
   if (files.length !== 1) {
-    console.error(`expected exactly one chunk for ${MONTH} in ${DIR}, found: ${files.join(', ') || '(none)'}`);
+    console.error(`expected exactly one chunk${EMIT_WINDOW ? '' : ` for ${MONTH}`} in ${DIR}, found: ${files.join(', ') || '(none)'}`);
     process.exit(1);
   }
   const file = `${DIR}/${files[0]}`;
@@ -443,12 +452,17 @@ async function main() {
   }
 
   if (SHARD_N > 1) console.log(`[shard] ${SHARD_K}/${SHARD_N} (this pod handles lines where idx%${SHARD_N}==${SHARD_K})`);
-  // ---- EMIT-ANON (filter mode): write UNRESOLVED events as anon rows to --out (gz), no CH insert ----
+  // ---- FILTER modes (no CH insert): emit-anon writes UNRESOLVED rows; emit-window writes
+  //      IDENTIFIED rows within [window-start,window-end). Both stream gz to --out. ----
   let anonGz: ReturnType<typeof createGzip> | null = null;
   let anonOut: ReturnType<typeof createWriteStream> | null = null;
   let anonEmitted = 0, anonResolvedSkip = 0, anonNoKey = 0;
-  if (EMIT_ANON) {
-    if (!OUT) { console.error('--emit-anon requires --out'); process.exit(1); }
+  let windowEmitted = 0, windowOutOfRange = 0;
+  if (EMIT_ANON || EMIT_WINDOW) {
+    if (!OUT) { console.error('--emit-anon/--emit-window requires --out'); process.exit(1); }
+    if (EMIT_WINDOW && (Number.isNaN(WINDOW_START_MS) || Number.isNaN(WINDOW_END_MS))) {
+      console.error('--emit-window requires --window-start and --window-end'); process.exit(1);
+    }
     anonGz = createGzip();
     anonOut = createWriteStream(OUT);
     anonGz.pipe(anonOut);
@@ -483,6 +497,17 @@ async function main() {
       arow.properties.__mp_device_id = props.$device_id ?? ''; // preserve real device id
       if (!anonGz!.write(`${JSON.stringify(arow)}\n`)) await once(anonGz!, 'drain');
       anonEmitted++;
+      continue;
+    }
+    if (EMIT_WINDOW) {
+      if (!uid) { anon++; continue; } // identified only (anon window is a separate pass)
+      const tw = props.time;
+      const cms = typeof tw === 'number' ? tw * 1000 - TZ_SHIFT_MS : Number.NaN;
+      if (Number.isNaN(cms) || cms < WINDOW_START_MS || cms >= WINDOW_END_MS) { windowOutOfRange++; continue; }
+      let wrow: any;
+      try { wrow = buildRow(D!, rec.event, props, uid, cms); } catch { xformErr++; continue; }
+      if (!anonGz!.write(`${JSON.stringify(wrow)}\n`)) await once(anonGz!, 'drain');
+      windowEmitted++;
       continue;
     }
     if (!uid) { anon++; continue; }
@@ -522,10 +547,14 @@ async function main() {
     batch.push(row); tailInserted++;
     if (batch.length >= BATCH) await flush();
   }
-  if (EMIT_ANON) {
+  if (EMIT_ANON || EMIT_WINDOW) {
     anonGz!.end();
     await once(anonOut!, 'close'); // wait for the FILE stream to fully flush+close, not just gzip's finish
-    console.log(`[DONE emit-anon] month=${MONTH} total=${total} emitted=${anonEmitted} resolvedSkip=${anonResolvedSkip} noKey=${anonNoKey} afterCutoff=${afterCutoff} droppedName=${droppedName} xformErr=${xformErr}`);
+    if (EMIT_WINDOW) {
+      console.log(`[DONE emit-window] chunk=${file} total=${total} emitted=${windowEmitted} anon=${anon} outOfRange=${windowOutOfRange} droppedName=${droppedName} parseErr=${parseErr} xformErr=${xformErr}`);
+    } else {
+      console.log(`[DONE emit-anon] month=${MONTH} total=${total} emitted=${anonEmitted} resolvedSkip=${anonResolvedSkip} noKey=${anonNoKey} afterCutoff=${afterCutoff} droppedName=${droppedName} xformErr=${xformErr}`);
+    }
     return;
   }
   if (!DRY_RUN) { if (RESUME) await reconcileZone(); await flush(); await Promise.all(inflight); }
