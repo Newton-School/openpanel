@@ -89,18 +89,33 @@ function dedupKey(row: any): string {
   return `h:${h.digest('base64')}`;
 }
 
+// A single V8 Set/Map caps at ~2^24 (~16.7M) entries — independent of heap size. BigSet shards
+// keys across N sub-Sets (routed by a cheap rolling hash) so the effective ceiling is N*16.7M.
+class BigSet {
+  private shards: Set<string>[];
+  constructor(private n = 16) { this.shards = Array.from({ length: n }, () => new Set<string>()); }
+  private idx(k: string): number {
+    let h = 0;
+    for (let i = 0; i < k.length; i++) h = (Math.imul(h, 31) + k.charCodeAt(i)) | 0;
+    return (h >>> 0) % this.n;
+  }
+  has(k: string): boolean { return this.shards[this.idx(k)].has(k); }
+  add(k: string): void { this.shards[this.idx(k)].add(k); }
+  get size(): number { let s = 0; for (const sh of this.shards) s += sh.size; return s; }
+}
+
 async function main() {
   const files = (await readdir(DIR!)).filter((f) => f.endsWith('.jsonl.gz')).sort();
   console.log(`[anon-insert] dir=${DIR} files=${files.length} dryRun=${DRY_RUN} project=${PROJECT_ID}`);
 
-  const seen = new Set<string>();
+  const seen = new BigSet(16);
   let total = 0, dup = 0, unique = 0, written = 0, parseErr = 0, wrongProject = 0;
   let batch: any[] = [];
   const inflight = new Set<Promise<void>>();
 
   // Dry-run doubles as the pre-push analysis (over UNIQUE events only): distinct anon
   // profiles (= how many profile rows Phase C will create), event-name mix, and date span.
-  const profiles = DRY_RUN ? new Set<string>() : null;
+  const profiles = DRY_RUN ? new BigSet(16) : null;
   const evNames = DRY_RUN ? new Map<string, number>() : null;
   let minTs = '9999', maxTs = '0';
 
