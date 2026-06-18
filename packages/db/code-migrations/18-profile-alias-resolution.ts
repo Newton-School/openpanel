@@ -8,7 +8,7 @@ import { runClickhouseMigrationCommands } from '../src/clickhouse/migration';
  * This migration creates ONLY the read-side `events_resolved` view, because it
  * is the one object creatable by the migration's service user. The other two
  * objects are a one-time ADMIN step — see the companion
- * `16-profile-alias-resolution.admin.sql`, run as the ClickHouse Cloud
+ * `18-profile-alias-resolution.admin.sql`, run as the ClickHouse Cloud
  * `default` user — because (verified on prod Cloud):
  *   1. The `device_alias` dictionary can only be created by `default`: a
  *      non-default user's CLICKHOUSE dict source demands explicit credentials,

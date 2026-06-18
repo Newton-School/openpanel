@@ -255,6 +255,58 @@ export function getSelectPropertyKey(
   return `${match}['${property.replace(new RegExp(`^${match}.`), '')}']`;
 }
 
+// --- profile-property CTE narrowing (perf) -------------------------------------
+// profile.properties.<key> refs are rendered as Map lookups `profile.properties['<key>']`.
+// Pulling the whole `properties` Map into the profile CTE makes the LEFT ANY JOIN hash carry
+// a ~1 KB Map per profile and OOMs at scale (verified on prod). Instead we project ONLY the
+// referenced keys as scalar columns in the CTE and rewrite the refs to those columns —
+// identical results at a fraction of the memory. Wildcard refs (mapExtractKeyLike) still
+// need the full Map, so those fall back. Scoped to the two chart builders that own the CTE;
+// the shared key helpers (used by funnel/conversion/overview) are untouched.
+const PROFILE_PROP_PREFIX = 'profile.properties.';
+
+function collectProfilePropertyKeys(
+  refs: { name: string }[],
+): { keys: string[]; hasWildcard: boolean } {
+  const keys = new Set<string>();
+  let hasWildcard = false;
+  for (const { name } of refs) {
+    if (!name.startsWith(PROFILE_PROP_PREFIX)) continue;
+    if (name.includes('*')) {
+      hasWildcard = true;
+      continue;
+    }
+    keys.add(name.slice(PROFILE_PROP_PREFIX.length));
+  }
+  return { keys: Array.from(keys), hasWildcard };
+}
+
+// Build the profile-CTE SELECT expression for the `properties` field: one scalar column per
+// referenced key, plus the full Map only when a wildcard ref needs it (or nothing specific).
+function profilePropertiesCteSelect(
+  keys: string[],
+  hasWildcard: boolean,
+): string {
+  const cols = keys.map(
+    (k) => `properties[${sqlstring.escape(k)}] as \`profile.properties.${k}\``,
+  );
+  if (hasWildcard || cols.length === 0) {
+    cols.push('properties as "profile.properties"');
+  }
+  return cols.join(', ');
+}
+
+// Rewrite `profile.properties['<key>']` -> `` `profile.properties.<key>` `` for the narrowed
+// keys (matches the raw render from transformPropertyKey/getSelectPropertyKey; never matches
+// the CTE's own `properties['<key>']`, which has no `profile.` prefix). No-op when keys=[].
+function rewriteProfilePropertyRefs(sql: string, keys: string[]): string {
+  let out = sql;
+  for (const k of keys) {
+    out = out.split(`profile.properties['${k}']`).join(`\`profile.properties.${k}\``);
+  }
+  return out;
+}
+
 export async function getChartSql({
   event,
   breakdowns,
@@ -422,7 +474,8 @@ export async function getChartSql({
         return 'id as "profile.id"';
       }
       if (field === 'properties') {
-        return 'properties as "profile.properties"';
+        const pp = collectProfilePropertyKeys([...event.filters, ...breakdowns]);
+        return profilePropertiesCteSelect(pp.keys, pp.hasWildcard);
       }
       if (field === 'email') {
         return 'email as "profile.email"';
@@ -550,7 +603,10 @@ export async function getChartSql({
       ) as subQuery`;
     sb.joins = {};
 
-    const sql = `${getWith()}${getSelect()} ${getFrom()} ${getJoins()} ${getWhere()} ${getGroupBy()} ${getOrderBy()} ${getFill()}`;
+    const sql = rewriteProfilePropertyRefs(
+    `${getWith()}${getSelect()} ${getFrom()} ${getJoins()} ${getWhere()} ${getGroupBy()} ${getOrderBy()} ${getFill()}`,
+    collectProfilePropertyKeys([...event.filters, ...breakdowns]).keys,
+  );
     console.log('-- Report --');
     console.log(sql.replaceAll(/[\n\r]/g, ' '));
     console.log('-- End --');
@@ -634,7 +690,10 @@ export async function getChartSql({
       '(SELECT total_count FROM _uc) as total_count';
   }
 
-  const sql = `${getWith()}${getSelect()} ${getFrom()} ${getJoins()} ${getWhere()} ${getGroupBy()} ${getOrderBy()} ${getFill()}`;
+  const sql = rewriteProfilePropertyRefs(
+    `${getWith()}${getSelect()} ${getFrom()} ${getJoins()} ${getWhere()} ${getGroupBy()} ${getOrderBy()} ${getFill()}`,
+    collectProfilePropertyKeys([...event.filters, ...breakdowns]).keys,
+  );
   console.log('-- Report --');
   console.log(sql.replaceAll(/[\n\r]/g, ' '));
   console.log('-- End --');
@@ -785,7 +844,8 @@ export async function getAggregateChartSql({
         return 'id as "profile.id"';
       }
       if (field === 'properties') {
-        return 'properties as "profile.properties"';
+        const pp = collectProfilePropertyKeys([...event.filters, ...breakdowns]);
+        return profilePropertiesCteSelect(pp.keys, pp.hasWildcard);
       }
       if (field === 'email') {
         return 'email as "profile.email"';
@@ -893,7 +953,10 @@ export async function getAggregateChartSql({
       ) as subQuery`;
     sb.joins = {};
 
-    const sql = getSql();
+    const sql = rewriteProfilePropertyRefs(
+    getSql(),
+    collectProfilePropertyKeys([...event.filters, ...breakdowns]).keys,
+  );
     console.log('-- Aggregate Chart --');
     console.log(sql.replaceAll(/[\n\r]/g, ' '));
     console.log('-- End --');
@@ -908,7 +971,10 @@ export async function getAggregateChartSql({
     sb.limit = limit;
   }
 
-  const sql = getSql();
+  const sql = rewriteProfilePropertyRefs(
+    getSql(),
+    collectProfilePropertyKeys([...event.filters, ...breakdowns]).keys,
+  );
   console.log('-- Aggregate Chart --');
   console.log(sql.replaceAll(/[\n\r]/g, ' '));
   console.log('-- End --');
