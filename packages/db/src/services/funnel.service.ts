@@ -260,12 +260,29 @@ export class FunnelService {
     const cohortMetadata = await fetchCohortsMetadata(cohortIds);
 
     // Create the funnel CTE (session-level)
+    //
+    // Newton fork: attribute each breakdown to the value at the FIRST funnel
+    // step, as a per-group aggregate (argMinIf) — do NOT add it to the
+    // windowFunnel GROUP BY. Grouping the sequence by a per-row property splits
+    // a user's steps across buckets whenever the property isn't identical on
+    // every step (e.g. an experiment `cohort` set on `experiment_started` but
+    // absent on `paid`): the later step lands in a separate (empty) bucket, the
+    // windowFunnel sequence never connects, and downstream steps show 0. Reading
+    // the entry-step value keeps each user's sequence intact in one group and
+    // matches standard funnel-breakdown semantics (segment by entry attribute).
+    const funnelConditions = this.getFunnelConditions(eventSeries, projectId);
+    const firstStepCondition = funnelConditions[0]!;
     const breakdownSelects = breakdowns.map((b, index) => {
       const bId = extractCohortId(b.name);
       const bName = bId ? cohortMetadata.get(bId)?.name : undefined;
-      return `${getSelectPropertyKey(b.name, projectId, bId ?? undefined, bName)} as b_${index}`;
+      const expr = getSelectPropertyKey(
+        b.name,
+        projectId,
+        bId ?? undefined,
+        bName,
+      );
+      return `argMinIf(${expr}, created_at, ${firstStepCondition}) as b_${index}`;
     });
-    const breakdownGroupBy = breakdowns.map((b, index) => `b_${index}`);
 
     const funnelCte = this.buildFunnelCte({
       projectId,
@@ -275,7 +292,6 @@ export class FunnelService {
       funnelWindowMilliseconds,
       timezone,
       additionalSelects: breakdownSelects,
-      additionalGroupBy: breakdownGroupBy,
       group,
     });
 
