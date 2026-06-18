@@ -22,11 +22,12 @@
  * Prep + run: see deploy/events-*.yaml.
  */
 import { randomUUID } from 'node:crypto';
-import { createReadStream, readFileSync } from 'node:fs';
+import { createReadStream, createWriteStream, readFileSync } from 'node:fs';
 import { readFile, readdir } from 'node:fs/promises';
+import { once } from 'node:events';
 import { createInterface } from 'node:readline';
 import { parseArgs } from 'node:util';
-import { createGunzip } from 'node:zlib';
+import { createGunzip, createGzip } from 'node:zlib';
 import { ClickHouseLogLevel } from '@clickhouse/client';
 import { TABLE_NAMES, ch, createClient } from '../src/clickhouse/client';
 
@@ -51,6 +52,8 @@ const { values } = parseArgs({
     resume: { type: 'boolean', default: false }, // resume a wedged month: skip committed rows, reconcile the boundary by __source_insert_id
     'resume-safety': { type: 'string', default: '500000' }, // reconcile-zone half-width (>= concurrency*batch covers any out-of-order frontier hole)
     'insert-timeout': { type: 'string', default: '120000' }, // hard per-insert deadline (ms); aborts a stalled insert instead of hanging
+    'emit-anon': { type: 'boolean', default: false }, // FILTER mode: write UNRESOLVED (anon) events as anon rows to --out (no CH insert)
+    out: { type: 'string' }, // --emit-anon output path (gzipped JSONL of CH-ready anon rows)
   },
   strict: true,
 });
@@ -73,6 +76,8 @@ const [SHARD_K, SHARD_N] = ((values.shard ?? '0/1').split('/').map(Number)) as [
 const RESUME = values.resume ?? false;
 const RESUME_SAFETY = Number.parseInt(values['resume-safety'] ?? '500000', 10);
 const INSERT_TIMEOUT_MS = Number.parseInt(values['insert-timeout'] ?? '120000', 10);
+const EMIT_ANON = values['emit-anon'] ?? false;
+const OUT = values.out;
 
 if (!DIR || !MONTH || !PROJECT_ID || !values.identity) {
   console.error('required: --dir <events dir> --month YYYY-MM --identity <map.json> --project-id <id>');
@@ -438,6 +443,14 @@ async function main() {
   }
 
   if (SHARD_N > 1) console.log(`[shard] ${SHARD_K}/${SHARD_N} (this pod handles lines where idx%${SHARD_N}==${SHARD_K})`);
+  // ---- EMIT-ANON (filter mode): write UNRESOLVED events as anon rows to --out (gz), no CH insert ----
+  let anonGz: ReturnType<typeof createGzip> | null = null;
+  let anonEmitted = 0, anonResolvedSkip = 0, anonNoKey = 0;
+  if (EMIT_ANON) {
+    if (!OUT) { console.error('--emit-anon requires --out'); process.exit(1); }
+    anonGz = createGzip();
+    anonGz.pipe(createWriteStream(OUT));
+  }
   const rl = createInterface({ input: createReadStream(file).pipe(createGunzip()), crlfDelay: Number.POSITIVE_INFINITY });
   let lineIdx = -1;
   outer: for await (const line of rl) {
@@ -453,6 +466,23 @@ async function main() {
     if (DROP_EVENT_NAMES.has(rec.event)) { droppedName++; continue; }
 
     const uid = resolveUid(props, idmap);
+    if (EMIT_ANON) {
+      if (uid) { anonResolvedSkip++; continue; } // identified -> already loaded in the main pass
+      const ta = props.time;
+      const cms = typeof ta === 'number' ? ta * 1000 - TZ_SHIFT_MS : Number.NaN;
+      if (!Number.isNaN(cms) && cms >= CUTOFF_MS) { afterCutoff++; continue; } // pre-cutoff only
+      const di = (typeof props.distinct_id === 'string' && props.distinct_id) ? props.distinct_id
+        : (typeof props.$device_id === 'string' && props.$device_id) ? props.$device_id : '';
+      if (!di) { anonNoKey++; continue; }
+      const anonId = `mp:distinct_id:${di}`;
+      let arow: any;
+      try { arow = buildRow(D!, rec.event, props, anonId, cms); } catch { xformErr++; continue; }
+      arow.device_id = anonId;                       // anon convention: profile_id == device_id
+      arow.properties.__mp_device_id = props.$device_id ?? ''; // preserve real device id
+      if (!anonGz!.write(`${JSON.stringify(arow)}\n`)) await once(anonGz!, 'drain');
+      anonEmitted++;
+      continue;
+    }
     if (!uid) { anon++; continue; }
 
     const t = props.time;
@@ -489,6 +519,12 @@ async function main() {
     }
     batch.push(row); tailInserted++;
     if (batch.length >= BATCH) await flush();
+  }
+  if (EMIT_ANON) {
+    anonGz!.end();
+    await once(anonGz!, 'finish');
+    console.log(`[DONE emit-anon] month=${MONTH} total=${total} emitted=${anonEmitted} resolvedSkip=${anonResolvedSkip} noKey=${anonNoKey} afterCutoff=${afterCutoff} droppedName=${droppedName} xformErr=${xformErr}`);
+    return;
   }
   if (!DRY_RUN) { if (RESUME) await reconcileZone(); await flush(); await Promise.all(inflight); }
 
