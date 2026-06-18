@@ -36,6 +36,16 @@ FROM base AS final
 COPY --from=manifests /app ./
 RUN pnpm install --filter "@openpanel/db..." --filter "@openpanel/importer..." --frozen-lockfile
 
+# awscli v2 — the --emit-anon filter job uploads its gz to S3 after the loader writes it.
+# Official installer (not Debian's v1) to guarantee IRSA / AssumeRoleWithWebIdentity support.
+# Placed before the source COPY so it stays cached on code-only edits. amd64-only image.
+RUN apt-get update && apt-get install -y --no-install-recommends unzip curl && \
+    curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip && \
+    unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install && \
+    rm -rf /tmp/aws /tmp/awscliv2.zip && \
+    apt-get purge -y unzip && apt-get autoremove -y && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
 # Source last: a tiny layer that's the only thing re-pushed on a code change.
 COPY . .
 WORKDIR /app/packages/db
