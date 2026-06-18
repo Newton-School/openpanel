@@ -35,6 +35,7 @@ const { values } = parseArgs({
     concurrency: { type: 'string', default: '3' },
     'insert-timeout': { type: 'string', default: '120000' },
     'project-id': { type: 'string', default: 'platform' },
+    table: { type: 'string' }, // target table (default: live events); e.g. events_window_staging
     'dry-run': { type: 'boolean', default: false },
     limit: { type: 'string' }, // optional cap for smoke tests
   },
@@ -44,6 +45,7 @@ const BATCH = Number.parseInt(values.batch ?? '100000', 10);
 const CONCURRENCY = Number.parseInt(values.concurrency ?? '3', 10);
 const INSERT_TIMEOUT_MS = Number.parseInt(values['insert-timeout'] ?? '120000', 10);
 const PROJECT_ID = values['project-id'] ?? 'platform';
+const TARGET_TABLE = values.table ?? TABLE_NAMES.events;
 const DRY_RUN = values['dry-run'] ?? false;
 const LIMIT = values.limit ? Number.parseInt(values.limit, 10) : Number.POSITIVE_INFINITY;
 if (!DIR) { console.error('--dir is required'); process.exit(1); }
@@ -66,7 +68,7 @@ async function insertRows(rows: any[]): Promise<void> {
     const timer = setTimeout(() => ac.abort(), INSERT_TIMEOUT_MS);
     try {
       await insertCh.insert({
-        table: TABLE_NAMES.events, values: rows, format: 'JSONEachRow', abort_signal: ac.signal,
+        table: TARGET_TABLE, values: rows, format: 'JSONEachRow', abort_signal: ac.signal,
         clickhouse_settings: {
           max_insert_block_size: '500000', input_format_parallel_parsing: 1,
           date_time_input_format: 'best_effort', wait_end_of_query: 1,
