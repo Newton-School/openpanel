@@ -40,7 +40,11 @@ CREATE DICTIONARY openpanel.profiles_is_external
   is_external UInt8
 )
 PRIMARY KEY project_id, id
-SOURCE(CLICKHOUSE(QUERY 'SELECT project_id, id, toUInt8(1) AS is_external FROM openpanel.profiles FINAL WHERE is_external = 1'))
+-- NOTE: the filter MUST be in a subquery. `SELECT toUInt8(1) AS is_external ... WHERE is_external = 1`
+-- makes the output alias (constant 1) shadow the table column in the WHERE, so it filters 1=1 and
+-- loads EVERY profile (anon included) with is_external=1 — silently breaking the dict. The subquery
+-- keeps the WHERE bound to the real column, so only identified profiles load.
+SOURCE(CLICKHOUSE(QUERY 'SELECT project_id, id, toUInt8(1) AS is_external FROM (SELECT project_id, id FROM openpanel.profiles FINAL WHERE is_external = 1)'))
 LAYOUT(COMPLEX_KEY_HASHED())
 LIFETIME(MIN 3000 MAX 3600);
 
