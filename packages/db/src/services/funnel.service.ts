@@ -77,11 +77,17 @@ export class FunnelService {
   }) {
     const funnels = this.getFunnelConditions(eventSeries, projectId);
     const primaryKey = group === 'profile_id' ? 'profile_id' : 'session_id';
+    // Newton fork: match Mixpanel's default (non-strict) funnel ordering — consecutive
+    // steps require created_at >= prev, not strictly >. OP events carry distinct ms
+    // timestamps so this is largely a no-op on real data, but it aligns with MP for any
+    // same-timestamp/burst sequences. Set NEWTON_FUNNEL_STRICT_INCREASE=1 to restore strict.
+    const windowFunnelMode =
+      process.env.NEWTON_FUNNEL_STRICT_INCREASE === '1' ? ", 'strict_increase'" : '';
 
     return clix(this.client, timezone)
       .select([
         primaryKey,
-        `windowFunnel(${funnelWindowMilliseconds}, 'strict_increase')(toUInt64(toUnixTimestamp64Milli(created_at)), ${funnels.join(', ')}) AS level`,
+        `windowFunnel(${funnelWindowMilliseconds}${windowFunnelMode})(toUInt64(toUnixTimestamp64Milli(created_at)), ${funnels.join(', ')}) AS level`,
         ...(group === 'session_id'
           ? ['argMax(profile_id, created_at) AS profile_id']
           : []),
