@@ -17,6 +17,20 @@ import { getProfiles, type IServiceProfile } from './profile.service';
 
 export const COHORT_MATERIALIZE_LIMIT = 10000;
 
+// Newton fork: cohort criteria are evaluated on the RESOLVED identity — the
+// raw profile_id folded through the device_alias dictionary, exactly like the
+// events_resolved view. This replaces the old identified-only MV gate
+// (`profile_id != device_id OR is_external = 1`), which undercounted
+// membership two ways: events fired while anonymous were dropped at insert
+// and never re-admitted after identify(), and newton-web sends
+// device_id == profile_id == uid so real identified users failed both arms.
+// Resolution at read is self-healing: a late-discovered alias folds a
+// member's pre-login events in at the next scheduled recompute. Membership is
+// stored as resolved ids, which is what its consumers already expect
+// (cohortMembersInClause re-expands members to their aliases; the all-cohorts
+// chart joins against events_resolved profile_ids).
+const RESOLVED_PROFILE_ID = `dictGetOrDefault('openpanel.device_alias', 'profile_id', (project_id, profile_id), profile_id)`;
+
 function buildTimeConstraint(timeframe: Timeframe): string {
   if (timeframe.type === 'relative') {
     const match = timeframe.value.match(/^(\d+)d$/);
@@ -109,8 +123,8 @@ export function buildEventCriteriaQuery(
     if (frequency) {
       const frequencyOp = getFrequencyOperator(frequency);
       return `
-        SELECT profile_id
-        FROM ${TABLE_NAMES.profile_event_property_summary_mv}
+        SELECT ${RESOLVED_PROFILE_ID} AS profile_id
+        FROM ${TABLE_NAMES.event_property_profile_summary_mv}
         WHERE project_id = ${sqlstring.escape(projectId)}
           AND name = ${sqlstring.escape(name)}
           AND ${timeConstraint.replace('created_at', 'event_date')}
@@ -121,8 +135,8 @@ export function buildEventCriteriaQuery(
     }
 
     return `
-      SELECT DISTINCT profile_id
-      FROM ${TABLE_NAMES.profile_event_property_summary_mv}
+      SELECT DISTINCT ${RESOLVED_PROFILE_ID} AS profile_id
+      FROM ${TABLE_NAMES.event_property_profile_summary_mv}
       WHERE project_id = ${sqlstring.escape(projectId)}
         AND name = ${sqlstring.escape(name)}
         AND ${timeConstraint.replace('created_at', 'event_date')}
@@ -133,8 +147,8 @@ export function buildEventCriteriaQuery(
   if (frequency) {
     const frequencyOp = getFrequencyOperator(frequency);
     return `
-      SELECT profile_id
-      FROM ${TABLE_NAMES.profile_event_summary_mv}
+      SELECT ${RESOLVED_PROFILE_ID} AS profile_id
+      FROM ${TABLE_NAMES.event_profile_summary_mv}
       WHERE project_id = ${sqlstring.escape(projectId)}
         AND name = ${sqlstring.escape(name)}
         AND ${timeConstraint.replace('created_at', 'event_date')}
@@ -144,8 +158,8 @@ export function buildEventCriteriaQuery(
   }
 
   return `
-    SELECT DISTINCT profile_id
-    FROM ${TABLE_NAMES.profile_event_summary_mv}
+    SELECT DISTINCT ${RESOLVED_PROFILE_ID} AS profile_id
+    FROM ${TABLE_NAMES.event_profile_summary_mv}
     WHERE project_id = ${sqlstring.escape(projectId)}
       AND name = ${sqlstring.escape(name)}
       AND ${timeConstraint.replace('created_at', 'event_date')}
