@@ -21,6 +21,7 @@ import {
   getSettingsForProject,
   type IServiceProfile,
   onlyReportEvents,
+  RESOLVED_PROFILE_ID_SQL,
   sankeyService,
   TABLE_NAMES,
   validateShareAccess,
@@ -709,28 +710,35 @@ export const chartRouter = createTRPCRouter({
         return `name IN (${event.map((e) => sqlstring.escape(e)).join(',')})`;
       };
 
+      // Newton fork: retention reads event_profile_summary_mv (migration 20) —
+      // identity-unfiltered, event-first key (prunes on name + date), resolved
+      // via device_alias at read. Replaces cohort_events_mv, whose
+      // identified-only insert filter undercounted anon-at-fire-time and
+      // deviceId==uid users (dropped in migration 21). DISTINCT because the
+      // aggregating MV can hold multiple pre-merge rows per key, and because
+      // resolution can fold several device rows into one user.
       const cohortQuery = `
-        WITH 
+        WITH
         cohort_users AS (
-          SELECT
-            profile_id AS userID,
+          SELECT DISTINCT
+            ${RESOLVED_PROFILE_ID_SQL} AS userID,
             project_id,
-            ${sqlToStartOf}(created_at) AS cohort_interval
-          FROM ${TABLE_NAMES.cohort_events_mv}
+            ${sqlToStartOf}(event_date) AS cohort_interval
+          FROM ${TABLE_NAMES.event_profile_summary_mv}
           WHERE ${whereEventNameIs(firstEvent)}
             AND project_id = ${sqlstring.escape(projectId)}
-            AND created_at BETWEEN toDate('${utc(dates.startDate)}') AND toDate('${utc(dates.endDate)}')
+            AND event_date BETWEEN toDate('${utc(dates.startDate)}') AND toDate('${utc(dates.endDate)}')
         ),
         last_event AS
         (
-            SELECT
-                profile_id,
+            SELECT DISTINCT
+                ${RESOLVED_PROFILE_ID_SQL} AS profile_id,
                 project_id,
-                toDate(created_at) AS event_date
-            FROM cohort_events_mv
+                toDate(event_date) AS event_date
+            FROM ${TABLE_NAMES.event_profile_summary_mv}
             WHERE ${whereEventNameIs(secondEvent)}
             AND project_id = ${sqlstring.escape(projectId)}
-            AND created_at BETWEEN toDate('${utc(dates.startDate)}') AND toDate('${utc(dates.endDate)}') + INTERVAL ${diffInterval} ${sqlInterval}
+            AND event_date BETWEEN toDate('${utc(dates.startDate)}') AND toDate('${utc(dates.endDate)}') + INTERVAL ${diffInterval} ${sqlInterval}
         ),
         retention_matrix AS
         (

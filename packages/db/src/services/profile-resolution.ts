@@ -19,6 +19,37 @@
 import sqlstring from 'sqlstring';
 import { chQuery, TABLE_NAMES } from '../clickhouse/client';
 
+/**
+ * The resolved identity of a raw `profile_id`: folded through the
+ * device_alias dictionary — identical semantics to the events_resolved view.
+ * For use in queries against raw tables/MVs that carry an unresolved
+ * profile_id (cohort compute, retention). Requires `GRANT dictGet ON
+ * openpanel.device_alias` for the querying user (see migration 20 admin.sql).
+ */
+export const RESOLVED_PROFILE_ID_SQL = `dictGetOrDefault('openpanel.device_alias', 'profile_id', (project_id, profile_id), profile_id)`;
+
+/**
+ * Current members of a cohort = rows from the LATEST compute only.
+ * cohort_members is a ReplacingMergeTree that storeCohortMembership only ever
+ * INSERTs into — a profile that stops matching keeps its old row forever, so
+ * an unversioned read reports departed members as still present (visibly
+ * wrong for rolling-window cohorts like "fired X in the last 7 days").
+ * Filtering to max(version) — the compute run id — restores exact semantics.
+ */
+export function currentCohortMembersSql(
+  projectId: string,
+  cohortId: string
+): string {
+  const pid = sqlstring.escape(projectId);
+  const cid = sqlstring.escape(cohortId);
+  return `SELECT profile_id FROM ${TABLE_NAMES.cohort_members} FINAL
+    WHERE project_id = ${pid} AND cohort_id = ${cid}
+      AND version = (
+        SELECT max(version) FROM ${TABLE_NAMES.cohort_members} FINAL
+        WHERE project_id = ${pid} AND cohort_id = ${cid}
+      )`;
+}
+
 export const IDENTITY_ID_LENGTH = 10;
 export const COOKIE_ID_LENGTH = 16;
 export const SERVER_HASH_ID_LENGTH = 32;
@@ -115,8 +146,7 @@ export function cohortMembersInClause(
   cohortId: string
 ): string {
   const pid = sqlstring.escape(projectId);
-  const cid = sqlstring.escape(cohortId);
-  const members = `SELECT profile_id FROM ${TABLE_NAMES.cohort_members} FINAL WHERE cohort_id = ${cid} AND project_id = ${pid}`;
+  const members = currentCohortMembersSql(projectId, cohortId);
   return `${column} IN (
     ${members}
     UNION DISTINCT

@@ -61,6 +61,9 @@ export const TABLE_NAMES = {
   dau_mv: 'dau_mv',
   event_names_mv: 'distinct_event_names_mv',
   event_property_values_mv: 'event_property_values_mv',
+  // DEPRECATED (dropped in migration 21; keys kept only so the historical
+  // migration chain 13/14/15/19 compiles and runs on fresh installs).
+  // Do NOT reference these from runtime code.
   cohort_events_mv: 'cohort_events_mv',
   sessions: 'sessions',
   events_imports: 'events_imports',
@@ -71,13 +74,16 @@ export const TABLE_NAMES = {
   groups: 'groups',
   cohort_members: 'cohort_members',
   cohort_metadata: 'cohort_metadata',
+  // DEPRECATED (see cohort_events_mv note above).
   profile_event_summary_mv: 'profile_event_summary_mv',
   profile_event_property_summary_mv: 'profile_event_property_summary_mv',
-  // Newton fork (migration 20): event-keyed, identity-unfiltered replacements
-  // for the two profile_event_* MVs above. Keyed (project, name, [property],
-  // date, profile) so cohort criteria prune to their own slice, and populated
-  // WITHOUT the identified-only gate — identity is resolved at read time via
-  // the device_alias dictionary instead (see cohort.service).
+  // Newton fork (migrations 20/21): event-keyed, identity-unfiltered summary
+  // MVs backing cohort compute and retention. Keyed (project, name,
+  // [property,] date, profile) so criteria prune to their own slice, and
+  // populated WITHOUT an identified-only gate — identity is resolved at read
+  // time via the device_alias dictionary instead (see cohort.service /
+  // profile-resolution). They replaced profile_event_summary_mv,
+  // profile_event_property_summary_mv and cohort_events_mv (dropped in 21).
   event_profile_summary_mv: 'event_profile_summary_mv',
   event_property_profile_summary_mv: 'event_property_profile_summary_mv',
 };
