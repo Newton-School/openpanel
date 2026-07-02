@@ -73,6 +73,13 @@ export const TABLE_NAMES = {
   cohort_metadata: 'cohort_metadata',
   profile_event_summary_mv: 'profile_event_summary_mv',
   profile_event_property_summary_mv: 'profile_event_property_summary_mv',
+  // Newton fork (migration 20): event-keyed, identity-unfiltered replacements
+  // for the two profile_event_* MVs above. Keyed (project, name, [property],
+  // date, profile) so cohort criteria prune to their own slice, and populated
+  // WITHOUT the identified-only gate — identity is resolved at read time via
+  // the device_alias dictionary instead (see cohort.service).
+  event_profile_summary_mv: 'event_profile_summary_mv',
+  event_property_profile_summary_mv: 'event_property_profile_summary_mv',
 };
 
 /**
