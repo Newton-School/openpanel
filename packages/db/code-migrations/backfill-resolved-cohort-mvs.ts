@@ -18,7 +18,9 @@ import { getIsCluster } from './helpers';
  * name starts with a number, so this never executes inside the init container
  * (where an eviction mid-run would force a full re-run). Run it supervised:
  *
- *   pnpm tsx packages/db/code-migrations/backfill-resolved-cohort-mvs.ts [flags]
+ *   CLICKHOUSE_URL=... jiti packages/db/code-migrations/backfill-resolved-cohort-mvs.ts [flags]
+ *   (or import { up } from a runner file — the argv self-execution guard below
+ *   doesn't fire under the jiti CLI)
  *
  * RESTART SAFETY -------------------------------------------------------------
  * AggregatingMergeTree is NOT idempotent under re-insert (countState rows merge
@@ -38,16 +40,21 @@ import { getIsCluster } from './helpers';
  *   --to=YYYYMM        Last month to backfill (default: current month).
  *   --until=DATETIME   Upper bound on created_at (REQUIRED unless --dry; see above).
  *   --batch-days=N     Days of data per INSERT within a month (default 2).
+ *   --parallel=N       Concurrent INSERT batches (default 2 — separate HTTP
+ *                      requests spread across replicas, keeping them all busy).
  *   --replace          DROP PARTITION on the target before each month (retry mode).
  *   --only=summary|property   Backfill just one of the two tables.
  */
 
 const DEFAULT_BATCH_DAYS = 2;
+const DEFAULT_PARALLEL = 2;
 
 // Spill the per-batch GROUP BY to disk instead of OOMing on the ARRAY JOIN
-// fan-out; harmless for the narrow summary inserts.
+// fan-out; harmless for the narrow summary inserts. max_insert_threads
+// parallelizes each INSERT's write stage (part building), which is otherwise
+// single-threaded and leaves the replicas' cores idle during backfill.
 const INSERT_SETTINGS =
-  'SETTINGS max_bytes_before_external_group_by = 4294967296';
+  'SETTINGS max_bytes_before_external_group_by = 4294967296, max_insert_threads = 8';
 
 type Batch = { label: string; sql: string };
 
@@ -141,6 +148,30 @@ function generateMonthBatches(
   return batches;
 }
 
+// Small concurrency pool: N workers drain the batch list in order. Concurrent
+// INSERTs are independent time ranges, so ordering doesn't matter; parts merge
+// asynchronously. Executes via chMigrationClient directly (the shared
+// runClickhouseMigrationCommands wrapper is per-call sequential).
+async function runBatchPool(
+  batches: Batch[],
+  parallel: number,
+  onDone: (batch: Batch, seconds: number) => void,
+): Promise<void> {
+  let next = 0;
+  const workers = Array.from(
+    { length: Math.max(1, Math.min(parallel, batches.length)) },
+    async () => {
+      while (next < batches.length) {
+        const batch = batches[next++]!;
+        const t0 = Date.now();
+        await chMigrationClient.command({ query: batch.sql });
+        onDone(batch, Math.round((Date.now() - t0) / 1000));
+      }
+    },
+  );
+  await Promise.all(workers);
+}
+
 async function getMinMonth(): Promise<number> {
   const result = await chMigrationClient.query({
     query: 'SELECT toYYYYMM(min(created_at)) AS m FROM events',
@@ -157,6 +188,10 @@ export async function up() {
   const only = getArg('only');
   const batchDays = Number.parseInt(
     getArg('batch-days') ?? String(DEFAULT_BATCH_DAYS),
+    10,
+  );
+  const parallel = Number.parseInt(
+    getArg('parallel') ?? String(DEFAULT_PARALLEL),
     10,
   );
 
@@ -213,6 +248,7 @@ export async function up() {
   console.log(`   Months:      ${fromMonth} → ${toMonth} (${months.length})`);
   console.log(`   Until:       ${untilStr}`);
   console.log(`   Batch size:  ${batchDays} day${batchDays === 1 ? '' : 's'}`);
+  console.log(`   Parallel:    ${parallel}`);
   console.log(`   Replace:     ${replaceMode}`);
   console.log(`   Targets:     ${targets.map((t) => t.label).join(', ')}`);
   console.log(`   Mode:        ${isDryRun ? 'DRY RUN' : 'EXECUTE'}`);
@@ -257,9 +293,9 @@ export async function up() {
       }
 
       const t0 = Date.now();
-      for (const batch of batches) {
-        await runClickhouseMigrationCommands([batch.sql]);
-      }
+      await runBatchPool(batches, parallel, (batch, seconds) => {
+        console.log(`      · ${batch.label} (${seconds}s)`);
+      });
       const monthSec = Math.round((Date.now() - t0) / 1000);
       const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
       console.log(

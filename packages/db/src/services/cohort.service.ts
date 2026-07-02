@@ -12,10 +12,24 @@ import type {
 import { cohortComputeQueue } from '@openpanel/queue';
 import { TABLE_NAMES, ch, chQuery } from '../clickhouse/client';
 import { db } from '../prisma-client';
-import { cohortMembersInClause } from './profile-resolution';
+import {
+  cohortMembersInClause,
+  currentCohortMembersSql,
+  RESOLVED_PROFILE_ID_SQL,
+} from './profile-resolution';
 import { getProfiles, type IServiceProfile } from './profile.service';
 
-export const COHORT_MATERIALIZE_LIMIT = 10000;
+// Newton fork: max members materialized into cohort_members per compute,
+// env-tunable so it can be raised without an image rebuild (set
+// COHORT_MATERIALIZE_LIMIT on the worker and restart). Cohorts larger than
+// this are silently truncated to an arbitrary subset — verified live: two
+// property cohorts truly have ~77K and ~227K members. Read side and CH are
+// comfortable at 1M+; the compute round-trips the member list through the
+// worker (~250-300MB heap per 1M members, worker has 8Gi).
+export const COHORT_MATERIALIZE_LIMIT = Number.parseInt(
+  process.env.COHORT_MATERIALIZE_LIMIT ?? '10000',
+  10,
+);
 
 // Newton fork: cohort criteria are evaluated on the RESOLVED identity — the
 // raw profile_id folded through the device_alias dictionary, exactly like the
@@ -29,7 +43,7 @@ export const COHORT_MATERIALIZE_LIMIT = 10000;
 // stored as resolved ids, which is what its consumers already expect
 // (cohortMembersInClause re-expands members to their aliases; the all-cohorts
 // chart joins against events_resolved profile_ids).
-const RESOLVED_PROFILE_ID = `dictGetOrDefault('openpanel.device_alias', 'profile_id', (project_id, profile_id), profile_id)`;
+const RESOLVED_PROFILE_ID = RESOLVED_PROFILE_ID_SQL;
 
 function buildTimeConstraint(timeframe: Timeframe): string {
   if (timeframe.type === 'relative') {
@@ -470,6 +484,10 @@ export async function getCohortMembers(
     FROM ${TABLE_NAMES.cohort_members} FINAL
     WHERE project_id = ${sqlstring.escape(projectId)}
       AND cohort_id = ${sqlstring.escape(cohortId)}
+      AND version = (
+        SELECT max(version) FROM ${TABLE_NAMES.cohort_members} FINAL
+        WHERE project_id = ${sqlstring.escape(projectId)} AND cohort_id = ${sqlstring.escape(cohortId)}
+      )
     ORDER BY matched_at DESC
     ${opts?.limit ? `LIMIT ${opts.limit}` : ''}
     ${opts?.offset ? `OFFSET ${opts.offset}` : ''}
@@ -501,9 +519,7 @@ export async function getCohortCount(
 
   const result = await chQuery<{ count: number }>(`
     SELECT count() as count
-    FROM ${TABLE_NAMES.cohort_members} FINAL
-    WHERE project_id = ${sqlstring.escape(projectId)}
-      AND cohort_id = ${sqlstring.escape(cohortId)}
+    FROM (${currentCohortMembersSql(projectId, cohortId)})
   `);
   return result[0]?.count || 0;
 }
@@ -632,11 +648,7 @@ export async function listCohortMemberProfiles({
     SELECT id, count() OVER () AS total_count
     FROM ${TABLE_NAMES.profiles} FINAL
     WHERE project_id = ${sqlstring.escape(projectId)}
-      AND id IN (
-        SELECT profile_id FROM ${TABLE_NAMES.cohort_members} FINAL
-        WHERE cohort_id = ${sqlstring.escape(cohortId)}
-          AND project_id = ${sqlstring.escape(projectId)}
-      )
+      AND id IN (${currentCohortMembersSql(projectId, cohortId)})
       ${searchCondition}
     ORDER BY created_at DESC
     LIMIT ${take} OFFSET ${offset}

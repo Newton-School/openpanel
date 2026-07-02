@@ -10,6 +10,7 @@ import type {
 import sqlstring from 'sqlstring';
 import { formatClickhouseDate, TABLE_NAMES } from '../clickhouse/client';
 import { db } from '../prisma-client';
+import { currentCohortMembersSql } from './profile-resolution';
 import { createSqlBuilder } from '../sql-builder';
 
 export type CohortMetadata = {
@@ -46,12 +47,9 @@ export function buildCohortMembershipQuery(
   cohortId: string,
   projectId: string,
 ): string {
-  return `
-    SELECT profile_id
-    FROM ${TABLE_NAMES.cohort_members} FINAL
-    WHERE cohort_id = ${sqlstring.escape(cohortId)}
-      AND project_id = ${sqlstring.escape(projectId)}
-  `;
+  // Latest compute only — see currentCohortMembersSql for why the version
+  // filter is required (departed members otherwise linger forever).
+  return currentCohortMembersSql(projectId, cohortId);
 }
 
 export function buildInlineCohortJoin(
@@ -87,10 +85,19 @@ export async function fetchProjectCohorts(
 export function buildAllCohortsMembershipQuery(
   projectId: string,
 ): string {
+  // Latest compute per cohort — same stale-member rationale as
+  // currentCohortMembersSql, applied per cohort_id.
+  const pid = sqlstring.escape(projectId);
   return `
     SELECT profile_id, cohort_id
     FROM ${TABLE_NAMES.cohort_members} FINAL
-    WHERE project_id = ${sqlstring.escape(projectId)}
+    WHERE project_id = ${pid}
+      AND (cohort_id, version) IN (
+        SELECT cohort_id, max(version)
+        FROM ${TABLE_NAMES.cohort_members} FINAL
+        WHERE project_id = ${pid}
+        GROUP BY cohort_id
+      )
   `;
 }
 
