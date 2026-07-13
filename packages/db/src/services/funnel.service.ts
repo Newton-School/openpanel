@@ -9,10 +9,13 @@ import { createSqlBuilder } from '../sql-builder';
 import {
   buildInlineCohortJoin,
   collectCohortIds,
+  collectProfilePropertyKeys,
   extractCohortId,
   fetchCohortsMetadata,
   getEventFiltersWhereClause,
   getSelectPropertyKey,
+  profilePropertiesCteSelect,
+  rewriteProfilePropertyRefs,
 } from './chart.service';
 import { onlyReportEvents } from './reports.service';
 
@@ -64,6 +67,7 @@ export class FunnelService {
     additionalSelects = [],
     additionalGroupBy = [],
     group = 'session_id',
+    profilePropertyKeys = [],
   }: {
     projectId: string;
     startDate: string;
@@ -74,8 +78,11 @@ export class FunnelService {
     additionalSelects?: string[];
     additionalGroupBy?: string[];
     group?: 'session_id' | 'profile_id';
+    profilePropertyKeys?: string[];
   }) {
-    const funnels = this.getFunnelConditions(eventSeries, projectId);
+    const funnels = this.getFunnelConditions(eventSeries, projectId).map((c) =>
+      rewriteProfilePropertyRefs(c, profilePropertyKeys),
+    );
     const primaryKey = group === 'profile_id' ? 'profile_id' : 'session_id';
     // Newton fork: match Mixpanel's default (non-strict) funnel ordering — consecutive
     // steps require created_at >= prev, not strictly >. OP events carry distinct ms
@@ -265,6 +272,15 @@ export class FunnelService {
     const cohortIds = collectCohortIds(allFilters, breakdowns);
     const cohortMetadata = await fetchCohortsMetadata(cohortIds);
 
+    // Newton fork: join only the referenced profile-property keys as scalar
+    // columns instead of every profile's whole properties Map (multi-GiB on the
+    // events×profiles join — same fix as the chart profile CTE). References in
+    // funnel conditions/breakdowns are rewritten to the scalar aliases below.
+    const profileProps = collectProfilePropertyKeys([
+      ...allFilters,
+      ...breakdowns,
+    ]);
+
     // Create the funnel CTE (session-level)
     //
     // Newton fork: attribute each breakdown to the value at the FIRST funnel
@@ -276,16 +292,17 @@ export class FunnelService {
     // windowFunnel sequence never connects, and downstream steps show 0. Reading
     // the entry-step value keeps each user's sequence intact in one group and
     // matches standard funnel-breakdown semantics (segment by entry attribute).
-    const funnelConditions = this.getFunnelConditions(eventSeries, projectId);
+    const funnelConditions = this.getFunnelConditions(
+      eventSeries,
+      projectId,
+    ).map((c) => rewriteProfilePropertyRefs(c, profileProps.keys));
     const firstStepCondition = funnelConditions[0]!;
     const breakdownSelects = breakdowns.map((b, index) => {
       const bId = extractCohortId(b.name);
       const bName = bId ? cohortMetadata.get(bId)?.name : undefined;
-      const expr = getSelectPropertyKey(
-        b.name,
-        projectId,
-        bId ?? undefined,
-        bName,
+      const expr = rewriteProfilePropertyRefs(
+        getSelectPropertyKey(b.name, projectId, bId ?? undefined, bName),
+        profileProps.keys,
       );
       return `argMinIf(${expr}, created_at, ${firstStepCondition}) as b_${index}`;
     });
@@ -299,25 +316,38 @@ export class FunnelService {
       timezone,
       additionalSelects: breakdownSelects,
       group,
+      profilePropertyKeys: profileProps.keys,
     });
 
     if (anyFilterOnProfile || anyBreakdownOnProfile) {
-      // Collect profile columns needed for filters and breakdowns (same as conversion.service)
+      // Collect profile columns needed for filters and breakdowns. Scalar
+      // columns (email etc.) are selected as-is; the properties Map is narrowed
+      // to the referenced keys via profilePropertiesCteSelect — joining the
+      // whole Map of every profile costs multi-GiB per funnel.
       const profileFields = new Set<string>(['id']);
       for (const f of profileFilters) {
-        profileFields.add(f.split('.')[0]!);
+        const fieldName = f.split('.')[0]!;
+        if (fieldName !== 'properties') {
+          profileFields.add(fieldName);
+        }
       }
       for (const b of breakdowns.filter((x) => x.name.startsWith('profile.'))) {
         const fieldName = b.name.replace('profile.', '').split('.')[0];
-        if (fieldName === 'properties') {
-          profileFields.add('properties');
-        } else if (['email', 'first_name', 'last_name'].includes(fieldName!)) {
+        if (['email', 'first_name', 'last_name'].includes(fieldName!)) {
           profileFields.add(fieldName!);
         }
       }
-      const profileSelectColumns = Array.from(profileFields).join(', ');
+      const selectColumns = Array.from(profileFields);
+      const referencesProperties =
+        profileFilters.some((f) => f.startsWith('properties')) ||
+        breakdowns.some((b) => b.name.startsWith('profile.properties'));
+      if (referencesProperties) {
+        selectColumns.push(
+          profilePropertiesCteSelect(profileProps.keys, profileProps.hasWildcard),
+        );
+      }
       funnelCte.leftJoin(
-        `(SELECT ${profileSelectColumns} FROM ${TABLE_NAMES.profiles} FINAL
+        `(SELECT ${selectColumns.join(', ')} FROM ${TABLE_NAMES.profiles} FINAL
           WHERE project_id = ${sqlstring.escape(projectId)}) as profile`,
         'profile.id = events.profile_id',
       );

@@ -272,7 +272,7 @@ export function getSelectPropertyKey(
 // the shared key helpers (used by funnel/conversion/overview) are untouched.
 const PROFILE_PROP_PREFIX = 'profile.properties.';
 
-function collectProfilePropertyKeys(
+export function collectProfilePropertyKeys(
   refs: { name: string }[],
 ): { keys: string[]; hasWildcard: boolean } {
   const keys = new Set<string>();
@@ -290,7 +290,7 @@ function collectProfilePropertyKeys(
 
 // Build the profile-CTE SELECT expression for the `properties` field: one scalar column per
 // referenced key, plus the full Map only when a wildcard ref needs it (or nothing specific).
-function profilePropertiesCteSelect(
+export function profilePropertiesCteSelect(
   keys: string[],
   hasWildcard: boolean,
 ): string {
@@ -306,7 +306,7 @@ function profilePropertiesCteSelect(
 // Rewrite `profile.properties['<key>']` -> `` `profile.properties.<key>` `` for the narrowed
 // keys (matches the raw render from transformPropertyKey/getSelectPropertyKey; never matches
 // the CTE's own `properties['<key>']`, which has no `profile.` prefix). No-op when keys=[].
-function rewriteProfilePropertyRefs(sql: string, keys: string[]): string {
+export function rewriteProfilePropertyRefs(sql: string, keys: string[]): string {
   let out = sql;
   for (const k of keys) {
     out = out.split(`profile.properties['${k}']`).join(`\`profile.properties.${k}\``);

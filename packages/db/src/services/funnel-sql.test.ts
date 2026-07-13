@@ -54,3 +54,53 @@ describe('funnel CTE events alias', () => {
     expect(sql).toContain('FROM events AS events');
   });
 });
+
+// The profiles join must only carry the referenced property keys as scalar
+// columns — joining every profile's whole properties Map costs multi-GiB per
+// funnel. Conditions are rewritten to the scalar aliases via
+// profilePropertyKeys (same mechanism as the chart profile CTE).
+describe('funnel profile-property scalar rewrite', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.stubEnv('NEWTON_RESOLVE_PROFILE', '1');
+  });
+
+  it('rewrites profile.properties refs in funnel conditions to scalar aliases', async () => {
+    const { funnelService } = await import('./funnel.service');
+    const sql = funnelService
+      .buildFunnelCte({
+        projectId: 'p1',
+        startDate: '2026-06-01 00:00:00',
+        endDate: '2026-06-02 00:00:00',
+        eventSeries: [
+          {
+            id: '1',
+            name: 'sign_up',
+            displayName: 'sign_up',
+            segment: 'event',
+            filters: [
+              {
+                id: 'f1',
+                name: 'profile.properties.plan',
+                operator: 'is',
+                value: ['pro'],
+              },
+            ],
+          },
+          eventSeries[1]!,
+        ],
+        funnelWindowMilliseconds: 86_400_000,
+        timezone: 'UTC',
+        profilePropertyKeys: ['plan'],
+      })
+      .toSQL();
+    expect(sql).toContain('`profile.properties.plan`');
+    expect(sql).not.toContain("profile.properties['plan']");
+  });
+
+  it('leaves conditions untouched when no keys are passed', async () => {
+    const { funnelService } = await import('./funnel.service');
+    const sql = buildFunnelSql(funnelService);
+    expect(sql).not.toContain('`profile.properties.');
+  });
+});

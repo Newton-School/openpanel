@@ -1,0 +1,44 @@
+-- Newton fork: ADMIN one-time step for migration 22 (properties['eventName'] bloom index).
+--
+-- Migration 22 (22-eventname-bloom-index.ts) only ADDs the index, which applies
+-- to newly-written parts. Existing parts must be backfilled with MATERIALIZE
+-- INDEX. Unlike the profile_id index (migration 17), building this one reads
+-- the fat `properties` Map column (~500 GiB uncompressed across the table), so
+-- it is run MANUALLY, PARTITION BY PARTITION (monthly, toYYYYMM), for control
+-- over load — NOT in one table-wide mutation and NOT in the code migration.
+--
+-- Run as openpanel_writer (has ALTER on openpanel.*) against the INGESTION
+-- service (always-on; mutations are background — SELECTs/INSERTs unaffected,
+-- just extra CPU/IO). The index files land in shared storage, so the analytics
+-- replica prunes with them too. Off-peak recommended.
+--
+-- ── Phase 0: pilot one recent partition and MEASURE before rolling the rest ──
+
+ALTER TABLE openpanel.events MATERIALIZE INDEX idx_properties_event_name IN PARTITION '202607';
+
+-- Wait for is_done=1:
+--   SELECT mutation_id, is_done, parts_to_do, latest_fail_reason
+--   FROM system.mutations
+--   WHERE table = 'events' AND command LIKE '%idx_properties_event_name%'
+--   ORDER BY create_time DESC;
+--
+-- Then measure pruning on the pilot partition (compare granules dropped):
+--   EXPLAIN indexes = 1
+--   SELECT count() FROM openpanel.events
+--   WHERE project_id = 'platform' AND name = 'log'
+--     AND properties['eventName'] = 'koyoInterviewPage_networkStatusChanged'
+--     AND toYYYYMM(created_at) = 202607;
+-- Expect idx_properties_event_name to drop nearly all granules for rare values.
+-- Also time the same query with/without `SETTINGS use_skip_indexes = 0` for a
+-- direct before/after on identical data.
+--
+-- ── Phase 1: roll remaining partitions, oldest data optional ──
+-- List partitions:
+--   SELECT partition, sum(rows) AS rows, formatReadableSize(sum(data_compressed_bytes)) AS size
+--   FROM system.parts WHERE database = 'openpanel' AND table = 'events' AND active
+--   GROUP BY partition ORDER BY partition;
+--
+-- Then one at a time (wait for is_done=1 between each):
+--   ALTER TABLE openpanel.events MATERIALIZE INDEX idx_properties_event_name IN PARTITION '<yyyymm>';
+--
+-- Status: not yet run on prod.
