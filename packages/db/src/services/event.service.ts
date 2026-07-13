@@ -483,7 +483,12 @@ export async function getEventList(options: GetEventListOptions) {
   // stream we keep the resolved view so the displayed profile_id is canonical.
   sb.from = `${profileId || cohortId ? TABLE_NAMES.events : TABLE_NAMES.eventsRead} e`;
 
-  const MAX_DATE_INTERVAL_IN_DAYS = 365;
+  // Newton fork: bound the empty-result lookback to 7 days (was 365 with
+  // window-doubling — up to 11 serial re-queries; on an unindexed properties
+  // filter each wide step full-scanned the table, ~6 min / 530 GiB per page
+  // view when nothing matched). Now a single 7-day fallback after the initial
+  // window; explicit startDate/endDate ranges are unaffected (no cursorWindow).
+  const MAX_DATE_INTERVAL_IN_DAYS = 7;
   // Cap the date interval to prevent infinity
   const safeDateIntervalInDays = Math.min(
     dateIntervalInDays,
@@ -680,7 +685,8 @@ export async function getEventList(options: GetEventListOptions) {
     meta: select.meta ?? true,
   });
 
-  // If we dont get any events, try without the cursor window
+  // If we dont get any events, retry ONCE at the max lookback (no doubling
+  // ladder — a zero-match filter must fail fast, not escalate scans)
   if (
     data.length === 0 &&
     sb.where.cursorWindow &&
@@ -688,7 +694,7 @@ export async function getEventList(options: GetEventListOptions) {
   ) {
     return getEventList({
       ...options,
-      dateIntervalInDays: dateIntervalInDays * 2,
+      dateIntervalInDays: MAX_DATE_INTERVAL_IN_DAYS,
     });
   }
 
