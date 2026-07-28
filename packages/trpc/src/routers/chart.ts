@@ -235,6 +235,7 @@ export const chartRouter = createTRPCRouter({
     }),
 
   properties: protectedProcedure
+    .use(cacheMiddleware(60 * 5))
     .input(
       z.object({
         event: z.string().optional(),
@@ -242,21 +243,28 @@ export const chartRouter = createTRPCRouter({
       })
     )
     .query(async ({ input: { projectId, event } }) => {
-      const profiles = await clix(ch, 'UTC')
-        .select<Pick<IServiceProfile, 'properties'>>(['properties'])
+      // Profile property keys have to come from an aggregate over every
+      // profile, not a sample of rows. `LIMIT n` on profiles only reveals the
+      // keys that happen to live in those n rows, so a property set on a small
+      // share of profiles was usually missing from breakdown/filter pickers —
+      // and because the sample had no ORDER BY, which rows came back varied
+      // with read scheduling, so the property appeared and vanished between
+      // requests. The LIMIT below caps the returned KEY list rather than the
+      // rows scanned, so it cannot hide a rare key.
+      const profileKeys = await clix(ch, 'UTC')
+        .select<{ key: string }>([
+          'DISTINCT arrayJoin(mapKeys(properties)) AS key',
+        ])
         .from(TABLE_NAMES.profiles)
         .where('project_id', '=', projectId)
         .where('is_external', '=', true)
+        .orderBy('key', 'ASC')
         .limit(10_000)
         .execute();
 
-      const profileProperties = [
-        ...new Set(
-          profiles.flatMap((p) =>
-            Object.keys(p.properties).map((k) => `profile.properties.${k}`)
-          )
-        ),
-      ];
+      const profileProperties = profileKeys.map(
+        (r) => `profile.properties.${r.key}`
+      );
 
       const query = clix(ch)
         .select<{ property_key: string; created_at: string }>([
