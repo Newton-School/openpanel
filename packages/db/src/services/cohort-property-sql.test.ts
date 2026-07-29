@@ -60,6 +60,18 @@ describe('buildPropertyBasedCohortQuery', () => {
     expect(sql).toContain('LIMIT 10');
   });
 
+  it('keeps the spill threshold below the hard memory limit', async () => {
+    const { PROFILE_COHORT_QUERY_SETTINGS } = await import('./cohort.service');
+    const spill = Number(
+      PROFILE_COHORT_QUERY_SETTINGS.max_bytes_before_external_group_by,
+    );
+    const limit = Number(PROFILE_COHORT_QUERY_SETTINGS.max_memory_usage);
+
+    // Above the limit the query is killed before it ever writes to disk.
+    expect(spill).toBe(314_572_800);
+    expect(limit).toBeGreaterThan(spill);
+  });
+
   it('matches nothing when every filter was dropped as empty', async () => {
     const sql = await buildSql({
       operator: 'and',

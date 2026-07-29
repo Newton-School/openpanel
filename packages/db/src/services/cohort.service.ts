@@ -34,14 +34,34 @@ export const COHORT_MATERIALIZE_LIMIT = Number.parseInt(
 
 // Newton fork: property cohorts aggregate every profile row for the project, so
 // they are the one cohort query that can outgrow the server's memory headroom.
-// The spill threshold has to stay well below the hard limit — a GROUP BY only
-// starts writing to disk once it crosses it, so a threshold above the limit
-// means the query dies before it ever spills. Measured on 8.3M profiles:
-// ~281MB spills either way, peak 695MiB at this threshold versus 2.4-3.0GiB for
-// the FINAL form these queries used to take, which cannot spill at all.
-const PROFILE_COHORT_QUERY_SETTINGS: ClickHouseSettings = {
-  max_bytes_before_external_group_by: '536870912',
-  max_memory_usage: '1400000000',
+// Past this many bytes the GROUP BY writes to disk instead of growing; raising
+// it trades headroom for very little time, because the volume spilled is set by
+// the data rather than by the threshold (measured on 8.3M profiles: ~281MB
+// spilled at a 300MB, 512MB or 768MB threshold, 6.9s/6.7s/6.0s, while peak
+// memory climbs 410MiB/695MiB/893MiB). Env-tunable so it can be retuned without
+// an image rebuild, same as COHORT_MATERIALIZE_LIMIT.
+const COHORT_QUERY_SPILL_BYTES_RAW = Number.parseInt(
+  process.env.COHORT_QUERY_SPILL_BYTES ?? '314572800',
+  10,
+);
+const COHORT_QUERY_SPILL_BYTES = Number.isNaN(COHORT_QUERY_SPILL_BYTES_RAW)
+  ? 314_572_800
+  : COHORT_QUERY_SPILL_BYTES_RAW;
+
+// A GROUP BY only starts spilling once it crosses the threshold, so the hard
+// limit has to stay above it — otherwise the query is killed before it ever
+// writes to disk. That inversion is exactly what ClickHouse Cloud ships by
+// default (a 4GiB threshold against a ceiling reached at 2.4-3.0GiB), and it is
+// why nothing spilled before. Derived from the threshold so retuning the env var
+// cannot reintroduce it.
+const COHORT_QUERY_MEMORY_LIMIT_BYTES = Math.max(
+  1_400_000_000,
+  COHORT_QUERY_SPILL_BYTES * 3,
+);
+
+export const PROFILE_COHORT_QUERY_SETTINGS: ClickHouseSettings = {
+  max_bytes_before_external_group_by: String(COHORT_QUERY_SPILL_BYTES),
+  max_memory_usage: String(COHORT_QUERY_MEMORY_LIMIT_BYTES),
 };
 
 // Newton fork: cohort criteria are evaluated on the RESOLVED identity — the
