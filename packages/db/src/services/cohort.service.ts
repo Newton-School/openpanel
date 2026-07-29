@@ -612,16 +612,17 @@ export async function enqueueCohortCompute(cohortId: string): Promise<void> {
     'cohortCompute',
     { cohortId },
     {
-      jobId: `cohort-${cohortId}`,
-      removeOnComplete: { age: 3600 },
+      // Deduplicate on the cohort rather than pinning a fixed jobId. A fixed
+      // jobId also gates on the *finished* job's record, which bullmq only
+      // deletes lazily from inside another job's completion — so once every
+      // cohort held a finished record, no add could ever land again and the 30
+      // minute cohortRefresh cron went silent permanently. Without a ttl the
+      // deduplication key is released when the job is completed *or* failed, so
+      // it only ever collapses a compute that is genuinely still in flight.
+      deduplication: { id: `cohort-${cohortId}` },
+      removeOnComplete: { age: 3600, count: 100 },
       removeOnFail: { age: 86400 },
     },
-  );
-}
-
-export async function removeCohortComputeJob(cohortId: string): Promise<void> {
-  await cohortComputeQueue.remove(
-    `cohort-${cohortId}`,
   );
 }
 
