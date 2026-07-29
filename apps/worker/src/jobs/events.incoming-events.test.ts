@@ -151,6 +151,7 @@ describe('incomingEvent', () => {
           delay: 200,
           type: 'exponential',
         },
+        removeOnFail: true,
       }
     );
 

@@ -12,7 +12,6 @@ import {
   getCohortMemberRoutes,
   getCohortMembers,
   listCohortMemberProfiles,
-  removeCohortComputeJob,
 } from '@openpanel/db';
 import {
   type CohortDefinition,
@@ -304,7 +303,6 @@ export const cohortRouter = createTRPCRouter({
         );
       }
 
-      await removeCohortComputeJob(input.cohortId);
       await enqueueCohortCompute(input.cohortId);
 
       return { success: true };

@@ -79,12 +79,19 @@ export function createSessionEndJob({
     },
     {
       delay: SESSION_TIMEOUT,
+      // The jobId is deliberately stable: extendSessionEndJob looks the delayed
+      // job up by it to push the timeout out. That also means a retained
+      // terminal record would make every later add for this device a silent
+      // no-op — the device's sessions would never be closed again — so the
+      // failed job must not outlive its attempts. Failures stay visible through
+      // the worker's failed handler (logger + job_duration_ms).
       jobId: getSessionEndJobId(payload.projectId, payload.deviceId),
       attempts: 3,
       backoff: {
         type: 'exponential',
         delay: 200,
       },
+      removeOnFail: true,
     }
   );
 }
