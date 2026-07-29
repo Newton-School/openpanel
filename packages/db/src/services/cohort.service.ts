@@ -9,6 +9,7 @@ import type {
   Timeframe,
 } from '@openpanel/validation';
 
+import type { ClickHouseSettings } from '@clickhouse/client';
 import { cohortComputeQueue } from '@openpanel/queue';
 import { TABLE_NAMES, ch, chQuery } from '../clickhouse/client';
 import { db } from '../prisma-client';
@@ -30,6 +31,18 @@ export const COHORT_MATERIALIZE_LIMIT = Number.parseInt(
   process.env.COHORT_MATERIALIZE_LIMIT ?? '10000',
   10,
 );
+
+// Newton fork: property cohorts aggregate every profile row for the project, so
+// they are the one cohort query that can outgrow the server's memory headroom.
+// The spill threshold has to stay well below the hard limit — a GROUP BY only
+// starts writing to disk once it crosses it, so a threshold above the limit
+// means the query dies before it ever spills. Measured on 8.3M profiles:
+// ~281MB spills either way, peak 695MiB at this threshold versus 2.4-3.0GiB for
+// the FINAL form these queries used to take, which cannot spill at all.
+const PROFILE_COHORT_QUERY_SETTINGS: ClickHouseSettings = {
+  max_bytes_before_external_group_by: '536870912',
+  max_memory_usage: '1400000000',
+};
 
 // Newton fork: cohort criteria are evaluated on the RESOLVED identity — the
 // raw profile_id folded through the device_alias dictionary, exactly like the
@@ -180,27 +193,40 @@ export function buildEventCriteriaQuery(
   `;
 }
 
-export function buildPropertyBasedCohortQuery(
-  projectId: string,
+function buildProfileCohortHavingClause(
   definition: PropertyBasedCohortDefinition,
-): string {
+): string | null {
   const { properties, operator } = definition.criteria;
-  const filterWhere = getProfileFiltersWhereClause(properties);
+  const filterWhere = getProfileFiltersWhereClause(properties, {
+    latestPerProfile: true,
+  });
   const filterClauses = Object.values(filterWhere);
 
   if (filterClauses.length === 0) {
-    return `SELECT id as profile_id FROM ${TABLE_NAMES.profiles} FINAL WHERE 1=0`;
+    return null;
   }
 
-  const filterClause = filterClauses.join(
-    operator === 'and' ? ' AND ' : ' OR ',
-  );
+  return filterClauses.join(operator === 'and' ? ' AND ' : ' OR ');
+}
+
+export function buildPropertyBasedCohortQuery(
+  projectId: string,
+  definition: PropertyBasedCohortDefinition,
+  limit?: number,
+): string {
+  const havingClause = buildProfileCohortHavingClause(definition);
+
+  if (!havingClause) {
+    return `SELECT id as profile_id FROM ${TABLE_NAMES.profiles} WHERE 1=0`;
+  }
 
   return `
     SELECT id as profile_id
-    FROM ${TABLE_NAMES.profiles} FINAL
+    FROM ${TABLE_NAMES.profiles}
     WHERE project_id = ${sqlstring.escape(projectId)}
-      AND (${filterClause})
+    GROUP BY id
+    HAVING (${havingClause})
+    ${limit ? `LIMIT ${limit}` : ''}
   `;
 }
 
@@ -248,6 +274,7 @@ export async function countEventBasedCohort(
 
 function getProfileFiltersWhereClause(
   filters: IChartEventFilter[],
+  { latestPerProfile = false }: { latestPerProfile?: boolean } = {},
 ): Record<string, string> {
   const where: Record<string, string> = {};
 
@@ -271,6 +298,16 @@ function getProfileFiltersWhereClause(
       columnAccess = `profiles.properties['${propKey}']`;
     } else {
       columnAccess = normalizedName;
+    }
+
+    if (latestPerProfile) {
+      // Resolve the profile's newest row inside a GROUP BY instead of reading
+      // through FINAL. created_at is the table's version column but it is not
+      // unique — duplicate rows routinely share one — so it is paired with the
+      // value itself to break ties deterministically. FINAL breaks the same
+      // ties by part order, which is not derivable from the data and can shift
+      // under a background merge.
+      columnAccess = `argMax(${columnAccess}, tuple(created_at, ${columnAccess}))`;
     }
 
     switch (operator) {
@@ -373,27 +410,14 @@ export async function computePropertyBasedCohort(
   definition: PropertyBasedCohortDefinition,
   limit?: number,
 ): Promise<string[]> {
-  const { properties, operator } = definition.criteria;
-  const filterWhere = getProfileFiltersWhereClause(properties);
-  const filterClauses = Object.values(filterWhere);
-
-  if (filterClauses.length === 0) {
+  if (!buildProfileCohortHavingClause(definition)) {
     return [];
   }
 
-  const filterClause = filterClauses.join(
-    operator === 'and' ? ' AND ' : ' OR ',
+  const results = await chQuery<{ profile_id: string }>(
+    buildPropertyBasedCohortQuery(projectId, definition, limit),
+    PROFILE_COHORT_QUERY_SETTINGS,
   );
-
-  const query = `
-    SELECT id as profile_id
-    FROM ${TABLE_NAMES.profiles} FINAL
-    WHERE project_id = ${sqlstring.escape(projectId)}
-      AND (${filterClause})
-    ${limit ? `LIMIT ${limit}` : ''}
-  `;
-
-  const results = await chQuery<{ profile_id: string }>(query);
   return results.map((r) => r.profile_id);
 }
 
@@ -401,26 +425,14 @@ export async function countPropertyBasedCohort(
   projectId: string,
   definition: PropertyBasedCohortDefinition,
 ): Promise<number> {
-  const { properties, operator } = definition.criteria;
-  const filterWhere = getProfileFiltersWhereClause(properties);
-  const filterClauses = Object.values(filterWhere);
-
-  if (filterClauses.length === 0) {
+  if (!buildProfileCohortHavingClause(definition)) {
     return 0;
   }
 
-  const filterClause = filterClauses.join(
-    operator === 'and' ? ' AND ' : ' OR ',
+  const results = await chQuery<{ count: number }>(
+    `SELECT count() as count FROM (${buildPropertyBasedCohortQuery(projectId, definition)})`,
+    PROFILE_COHORT_QUERY_SETTINGS,
   );
-
-  const query = `
-    SELECT count() as count
-    FROM ${TABLE_NAMES.profiles} FINAL
-    WHERE project_id = ${sqlstring.escape(projectId)}
-      AND (${filterClause})
-  `;
-
-  const results = await chQuery<{ count: number }>(query);
   return results[0]?.count ?? 0;
 }
 
