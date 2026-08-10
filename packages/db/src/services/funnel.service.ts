@@ -227,32 +227,33 @@ export class FunnelService {
     );
   }
 
-  async getFunnel({
+  /**
+   * Builds the funnel query up to and including the `funnel` CTE.
+   * Shared by getFunnel (the chart) and buildFunnelProfileIdsQuery (the
+   * "View Users" modal) so both always evaluate the exact same funnel:
+   * same breakdown attribution (argMinIf at the entry step), same
+   * profile/cohort/group joins. Any divergence between the two shows up
+   * as "chart says N users, modal says none" (NS-13549).
+   */
+  async buildFunnelQuery({
     projectId,
     startDate,
     endDate,
-    series,
-    options,
+    eventSeries,
     breakdowns = [],
-    limit,
-    timezone = 'UTC',
-  }: IReportInput & { timezone: string; events?: IChartEvent[] }) {
-    if (!startDate || !endDate) {
-      throw new Error('startDate and endDate are required');
-    }
-
-    const funnelOptions = options?.type === 'funnel' ? options : undefined;
-    const funnelWindow = funnelOptions?.funnelWindow ?? 24;
-    const funnelGroup = funnelOptions?.funnelGroup;
-
-    const eventSeries = onlyReportEvents(series);
-
-    if (eventSeries.length === 0) {
-      throw new Error('events are required');
-    }
-
-    const funnelWindowSeconds = funnelWindow * 3600;
-    const funnelWindowMilliseconds = funnelWindowSeconds * 1000;
+    funnelWindowMilliseconds,
+    funnelGroup,
+    timezone,
+  }: {
+    projectId: string;
+    startDate: string;
+    endDate: string;
+    eventSeries: IChartEvent[];
+    breakdowns: { name: string }[];
+    funnelWindowMilliseconds: number;
+    funnelGroup?: string;
+    timezone: string;
+  }) {
     const group = this.getFunnelGroup(funnelGroup);
     const profileFilters = this.getProfileFilters(eventSeries);
     const anyFilterOnProfile = profileFilters.length > 0;
@@ -381,6 +382,44 @@ export class FunnelService {
       'SELECT * FROM session_funnel WHERE level != 0',
     );
 
+    return funnelQuery;
+  }
+
+  async getFunnel({
+    projectId,
+    startDate,
+    endDate,
+    series,
+    options,
+    breakdowns = [],
+    limit,
+    timezone = 'UTC',
+  }: IReportInput & { timezone: string; events?: IChartEvent[] }) {
+    if (!startDate || !endDate) {
+      throw new Error('startDate and endDate are required');
+    }
+
+    const funnelOptions = options?.type === 'funnel' ? options : undefined;
+    const funnelWindow = funnelOptions?.funnelWindow ?? 24;
+    const funnelGroup = funnelOptions?.funnelGroup;
+
+    const eventSeries = onlyReportEvents(series);
+
+    if (eventSeries.length === 0) {
+      throw new Error('events are required');
+    }
+
+    const funnelQuery = await this.buildFunnelQuery({
+      projectId,
+      startDate,
+      endDate,
+      eventSeries,
+      breakdowns,
+      funnelWindowMilliseconds: funnelWindow * 3600 * 1000,
+      funnelGroup,
+      timezone,
+    });
+
     funnelQuery
       .select<{
         level: number;
@@ -480,6 +519,95 @@ export class FunnelService {
         const bTotal = b.steps.reduce((acc, step) => acc + step.count, 0);
         return bTotal - aTotal;
       });
+  }
+
+  /**
+   * Query for the profile ids behind a funnel step ("View Users" modal).
+   * stepIndex is 0-based; completed = level >= step, dropped = level == step.
+   * The clicked breakdown row passes back the DISPLAY labels (trimmed,
+   * empty → EMPTY_BREAKDOWN_LABEL via normalizeBreakdownValue), so values
+   * are matched against the same normalization, not the raw column.
+   */
+  async buildFunnelProfileIdsQuery({
+    projectId,
+    startDate,
+    endDate,
+    series,
+    stepIndex,
+    showDropoffs = false,
+    breakdowns = [],
+    breakdownValues = [],
+    funnelWindow,
+    funnelGroup,
+    timezone,
+    limit = 1000,
+  }: {
+    projectId: string;
+    startDate: string;
+    endDate: string;
+    series: IReportInput['series'];
+    stepIndex: number;
+    showDropoffs?: boolean;
+    breakdowns?: { name: string }[];
+    breakdownValues?: string[];
+    funnelWindow?: number;
+    funnelGroup?: string;
+    timezone: string;
+    limit?: number;
+  }) {
+    const eventSeries = onlyReportEvents(series);
+
+    if (eventSeries.length === 0) {
+      throw new Error('At least one event series is required');
+    }
+
+    const funnelQuery = await this.buildFunnelQuery({
+      projectId,
+      startDate,
+      endDate,
+      eventSeries,
+      breakdowns,
+      funnelWindowMilliseconds: (funnelWindow ?? 24) * 3600 * 1000,
+      funnelGroup,
+      timezone,
+    });
+
+    const targetLevel = stepIndex + 1;
+
+    funnelQuery
+      .select<{ profile_id: string }>(['DISTINCT profile_id'])
+      .from('funnel')
+      .where('level', showDropoffs ? '=' : '>=', targetLevel);
+
+    breakdowns.forEach((_, index) => {
+      const value = breakdownValues[index];
+      if (value === undefined) {
+        return;
+      }
+      if (value === EMPTY_BREAKDOWN_LABEL) {
+        funnelQuery.rawWhere(
+          `(trim(b_${index}) = '' OR trim(b_${index}) = ${sqlstring.escape(EMPTY_BREAKDOWN_LABEL)})`,
+        );
+      } else {
+        funnelQuery.rawWhere(
+          `trim(b_${index}) = ${sqlstring.escape(value)}`,
+        );
+      }
+    });
+
+    // Cap the number of profiles to avoid exceeding ClickHouse
+    // max_query_size when passing the ids to the profiles lookup.
+    funnelQuery.limit(limit);
+
+    return funnelQuery;
+  }
+
+  async getFunnelProfileIds(
+    input: Parameters<FunnelService['buildFunnelProfileIdsQuery']>[0],
+  ): Promise<string[]> {
+    const query = await this.buildFunnelProfileIdsQuery(input);
+    const rows = await query.execute();
+    return rows.map((row) => row.profile_id).filter(Boolean);
   }
 }
 
