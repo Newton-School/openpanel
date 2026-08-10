@@ -27,7 +27,6 @@ import {
   validateShareAccess,
 } from '@openpanel/db';
 import {
-  type IChartEvent,
   zChartSeries,
   zCriteria,
   zRange,
@@ -923,121 +922,29 @@ export const chartRouter = createTRPCRouter({
 
       const { startDate, endDate } = getChartStartEndDate(input, timezone);
 
-      // stepIndex is 0-based, but level is 1-based, so we need level >= stepIndex + 1
-      const targetLevel = stepIndex + 1;
-
-      const eventSeries = onlyReportEvents(series);
-
-      if (eventSeries.length === 0) {
-        throw new Error('At least one event series is required');
-      }
-
-      const funnelWindowSeconds = (funnelWindow || 24) * 3600;
-      const funnelWindowMilliseconds = funnelWindowSeconds * 1000;
-
-      // Get the grouping strategy (profile_id or session_id)
-      const group = funnelService.getFunnelGroup(funnelGroup);
-
-      const anyFilterOnGroup = (eventSeries as IChartEvent[]).some((e) =>
-        e.filters?.some((f) => f.name.startsWith('group.'))
-      );
-      const anyBreakdownOnGroup = breakdowns.some((b) =>
-        b.name.startsWith('group.')
-      );
-      const needsGroupArrayJoin = anyFilterOnGroup || anyBreakdownOnGroup;
-
-      // Breakdown selects/groupBy so we can filter by specific breakdown values
-      const breakdownSelects = breakdowns.map(
-        (b, index) => `${getSelectPropertyKey(b.name, projectId)} as b_${index}`
-      );
-      const breakdownGroupBy = breakdowns.map((_, index) => `b_${index}`);
-
-      // Create funnel CTE using funnel service
-      const funnelCte = funnelService.buildFunnelCte({
+      // Delegate to FunnelService so the profile list is computed from the
+      // exact same funnel query as the chart itself (same breakdown
+      // attribution and profile/cohort joins) — see NS-13549.
+      const ids = await funnelService.getFunnelProfileIds({
         projectId,
         startDate,
         endDate,
-        eventSeries: eventSeries as IChartEvent[],
-        funnelWindowMilliseconds,
+        series,
+        stepIndex,
+        showDropoffs,
+        breakdowns,
+        breakdownValues,
+        funnelWindow,
+        funnelGroup,
         timezone,
-        additionalSelects: breakdownSelects,
-        additionalGroupBy: breakdownGroupBy,
-        group,
       });
 
-      // Check for profile filters and add profile join if needed
-      const profileFilters = funnelService.getProfileFilters(
-        eventSeries as IChartEvent[]
-      );
-      if (profileFilters.length > 0) {
-        const fieldsToSelect = uniq(
-          profileFilters.map((f) => f.split('.')[0])
-        ).join(', ');
-        funnelCte.leftJoin(
-          `(SELECT id, ${fieldsToSelect} FROM ${TABLE_NAMES.profiles} FINAL WHERE project_id = ${sqlstring.escape(projectId)}) as profile`,
-          'profile.id = events.profile_id'
-        );
-      }
-
-      if (needsGroupArrayJoin) {
-        funnelCte.rawJoin('ARRAY JOIN groups AS _group_id');
-        funnelCte.rawJoin('LEFT ANY JOIN _g ON _g.id = _group_id');
-      }
-
-      // Build main query
-      const query = clix(ch, timezone);
-      if (needsGroupArrayJoin) {
-        query.with(
-          '_g',
-          `SELECT id, name, type, properties FROM ${TABLE_NAMES.groups} FINAL WHERE project_id = ${sqlstring.escape(projectId)}`
-        );
-      }
-      query.with('session_funnel', funnelCte);
-
-      if (group === 'profile_id') {
-        const breakdownAggregates =
-          breakdowns.length > 0
-            ? `, ${breakdowns.map((_, index) => `any(b_${index}) AS b_${index}`).join(', ')}`
-            : '';
-        query.with(
-          'funnel',
-          `SELECT profile_id, max(level) AS level${breakdownAggregates} FROM (SELECT * FROM session_funnel WHERE level != 0) GROUP BY profile_id`
-        );
-      } else {
-        query.with('funnel', 'SELECT * FROM session_funnel WHERE level != 0');
-      }
-
-      query.select(['DISTINCT profile_id']).from('funnel');
-
-      if (showDropoffs) {
-        query.where('level', '=', targetLevel);
-      } else {
-        query.where('level', '>=', targetLevel);
-      }
-
-      // Filter by specific breakdown values when a breakdown row was clicked
-      breakdowns.forEach((_, index) => {
-        const value = breakdownValues[index];
-        if (value !== undefined) {
-          query.where(`b_${index}`, '=', value);
-        }
-      });
-
-      // Cap the number of profiles to avoid exceeding ClickHouse max_query_size
-      // when passing IDs to the next query
-      query.limit(1000);
-
-      const profileIdsResult = (await query.execute()) as {
-        profile_id: string;
-      }[];
-
-      if (profileIdsResult.length === 0) {
+      if (ids.length === 0) {
         return [];
       }
 
       // Fetch profile details in batches to avoid exceeding ClickHouse max_query_size
       // when there are many profile IDs to pass in the IN(...) clause
-      const ids = profileIdsResult.map((p) => p.profile_id).filter(Boolean);
       const BATCH_SIZE = 500;
       const profiles: IServiceProfile[] = [];
       for (let i = 0; i < ids.length; i += BATCH_SIZE) {
