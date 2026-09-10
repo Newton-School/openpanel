@@ -5,6 +5,7 @@ import EditReportName from '../report/edit-report-name';
 import { ReportChartType } from '@/components/report/ReportChartType';
 import { ReportInterval } from '@/components/report/ReportInterval';
 import { ReportLineType } from '@/components/report/ReportLineType';
+import { ReportExportButton } from '@/components/report/ReportExportButton';
 import { ReportSaveButton } from '@/components/report/ReportSaveButton';
 import {
   changeChartType,
@@ -109,7 +110,8 @@ export default function ReportEditor({
             />
             <ReportLineType className="min-w-0 flex-1" />
           </div>
-          <div className="col-start-2 row-start-1 text-right md:col-start-6">
+          <div className="col-start-2 row-start-1 flex justify-end gap-2 md:col-start-6">
+            <ReportExportButton />
             <ReportSaveButton />
           </div>
         </div>
