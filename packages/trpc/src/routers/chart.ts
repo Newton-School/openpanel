@@ -16,6 +16,7 @@ import {
   getGroupPropertySelect,
   getProfilePropertySelect,
   getProfilesCached,
+  getProfilesLastSeen,
   getReportById,
   getSelectPropertyKey,
   getSettingsForProject,
@@ -63,6 +64,19 @@ const cacher = cacheMiddleware(60);
 // Upper bound for the funnel "View Users" CSV export. Profiles are looked up
 // in batches of 500 ids, so this is ~100 ClickHouse queries at the cap.
 const FUNNEL_PROFILES_EXPORT_LIMIT = 50_000;
+
+// Mixpanel's user export carries $last_seen; only the CSV path asks for it,
+// the on-screen list does not need the extra summary-MV round trip.
+async function attachLastSeen<T extends { id: string }>(
+  profiles: T[],
+  projectId: string,
+): Promise<Array<T & { lastSeen: Date | null }>> {
+  const lastSeen = await getProfilesLastSeen(
+    profiles.map((p) => p.id),
+    projectId,
+  );
+  return profiles.map((p) => ({ ...p, lastSeen: lastSeen.get(p.id) ?? null }));
+}
 
 const chartProcedure = publicProcedure.use(
   async ({ ctx, next, getRawInput }) => {
@@ -802,6 +816,7 @@ export const chartRouter = createTRPCRouter({
         interval: zTimeInterval.default('day'),
         series: zChartSeries,
         breakdowns: z.record(z.string(), z.string()).optional(),
+        includeLastSeen: z.boolean().optional(),
       })
     )
     .query(async ({ input }) => {
@@ -886,7 +901,9 @@ export const chartRouter = createTRPCRouter({
         profiles.push(...batchProfiles);
       }
 
-      return profiles;
+      return input.includeLastSeen
+        ? attachLastSeen(profiles, projectId)
+        : profiles;
     }),
 
   getFunnelProfiles: protectedProcedure
@@ -918,6 +935,7 @@ export const chartRouter = createTRPCRouter({
           .describe(
             'Max profiles to return. The modal uses the default; CSV export raises it.'
           ),
+        includeLastSeen: z.boolean().optional(),
       })
     )
     .query(async ({ input }) => {
@@ -968,7 +986,9 @@ export const chartRouter = createTRPCRouter({
         profiles.push(...batchProfiles);
       }
 
-      return profiles;
+      return input.includeLastSeen
+        ? attachLastSeen(profiles, projectId)
+        : profiles;
     }),
 });
 

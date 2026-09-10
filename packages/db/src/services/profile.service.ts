@@ -171,6 +171,39 @@ export async function getProfiles(ids: string[], projectId: string) {
 
 export const getProfilesCached = cacheable(getProfiles, 60 * 5);
 
+/**
+ * Last event time per profile, read from the per-profile summary MV rather
+ * than the events table. Used by the "View Users" CSV export (Mixpanel's
+ * user export carries $last_seen). Profiles with no summarised events are
+ * absent from the map.
+ */
+export async function getProfilesLastSeen(
+  ids: string[],
+  projectId: string,
+): Promise<Map<string, Date>> {
+  const filteredIds = uniq(ids.filter((id) => id !== ''));
+  const result = new Map<string, Date>();
+  if (filteredIds.length === 0) {
+    return result;
+  }
+  // Keep each IN list well under max_query_size.
+  const BATCH_SIZE = 500;
+  for (let i = 0; i < filteredIds.length; i += BATCH_SIZE) {
+    const batch = filteredIds.slice(i, i + BATCH_SIZE);
+    const rows = await chQuery<{ profile_id: string; last_seen: string }>(
+      `SELECT profile_id, maxMerge(last_event_time) AS last_seen
+       FROM ${TABLE_NAMES.event_profile_summary_mv}
+       WHERE project_id = ${sqlstring.escape(projectId)}
+         AND profile_id IN (${batch.map((id) => sqlstring.escape(id)).join(',')})
+       GROUP BY profile_id`,
+    );
+    for (const row of rows) {
+      result.set(row.profile_id, convertClickhouseDateToJs(row.last_seen));
+    }
+  }
+  return result;
+}
+
 export async function getProfileList({
   take,
   cursor,

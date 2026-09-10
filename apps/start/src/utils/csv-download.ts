@@ -33,15 +33,19 @@ type CsvProfile = {
   firstName?: string | null;
   lastName?: string | null;
   email?: string | null;
+  avatar?: string | null;
   isExternal?: boolean;
   createdAt?: Date | string | null;
+  lastSeen?: Date | string | null;
   properties?: Record<string, unknown>;
 };
 
+// Geo/device properties every profile can carry; emitted right after the
+// Mixpanel-shaped columns so the common columns sit in a fixed order.
 const PROFILE_PROPERTY_COLUMNS = [
-  'country',
-  'region',
   'city',
+  'region',
+  'country',
   'os',
   'os_version',
   'browser',
@@ -50,41 +54,69 @@ const PROFILE_PROPERTY_COLUMNS = [
   'referrer_name',
 ] as const;
 
+function toIsoSeconds(value: Date | string | null | undefined): string {
+  if (!value) return '';
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 19);
+}
+
+function cellValue(value: unknown): string {
+  if (value === undefined || value === null) return '';
+  return typeof value === 'object' ? JSON.stringify(value) : String(value);
+}
+
 /**
- * One row per profile, as shown in the "View Users" modal. Fixed columns
- * first, then the device/geo properties the profile carries; any other
- * custom profile properties are serialised into a single JSON column so
- * nothing is silently dropped.
+ * One row per profile, as shown in the "View Users" modal.
+ *
+ * Column order mirrors Mixpanel's user export
+ * ($distinct_id, $name, $email, $last_seen, $avatar, $city) so the file drops
+ * into the same spreadsheets, then our fixed geo/device columns, then every
+ * other profile property present on at least one exported user as its own
+ * column (most-populated first). Nothing is folded into a JSON blob.
  */
 export function profilesToCSV(profiles: CsvProfile[]): string {
+  const fixedPropertyKeys = new Set<string>(PROFILE_PROPERTY_COLUMNS);
+  const customCounts = new Map<string, number>();
+  for (const p of profiles) {
+    for (const [key, value] of Object.entries(p.properties ?? {})) {
+      if (fixedPropertyKeys.has(key) || value === undefined || value === null || value === '') {
+        continue;
+      }
+      customCounts.set(key, (customCounts.get(key) ?? 0) + 1);
+    }
+  }
+  const customKeys = [...customCounts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([key]) => key);
+
   const header = [
-    'profile_id',
+    'distinct_id',
+    'name',
+    'email',
+    'last_seen',
+    'avatar',
+    ...PROFILE_PROPERTY_COLUMNS,
     'first_name',
     'last_name',
-    'email',
     'identified',
     'profile_created_at',
-    ...PROFILE_PROPERTY_COLUMNS,
-    'other_properties',
+    ...customKeys,
   ];
   const rows = profiles.map((p) => {
     const props = p.properties ?? {};
-    const known = new Set<string>(PROFILE_PROPERTY_COLUMNS);
-    const other = Object.fromEntries(
-      Object.entries(props).filter(([key]) => !known.has(key)),
-    );
+    const name = [p.firstName, p.lastName].filter(Boolean).join(' ');
     return [
       p.id,
+      name,
+      p.email ?? '',
+      toIsoSeconds(p.lastSeen),
+      p.avatar ?? '',
+      ...PROFILE_PROPERTY_COLUMNS.map((key) => cellValue(props[key])),
       p.firstName ?? '',
       p.lastName ?? '',
-      p.email ?? '',
       p.isExternal ? 'true' : 'false',
-      p.createdAt ? new Date(p.createdAt).toISOString() : '',
-      ...PROFILE_PROPERTY_COLUMNS.map((key) => {
-        const value = props[key];
-        return value === undefined || value === null ? '' : String(value);
-      }),
-      Object.keys(other).length ? JSON.stringify(other) : '',
+      toIsoSeconds(p.createdAt),
+      ...customKeys.map((key) => cellValue(props[key])),
     ];
   });
   return buildCSV([header, ...rows]);

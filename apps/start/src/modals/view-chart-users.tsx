@@ -205,6 +205,7 @@ interface ChartUsersViewProps {
 
 function ChartUsersView({ chartData, report, date }: ChartUsersViewProps) {
   const trpc = useTRPC();
+  const queryClient = useQueryClient();
   const [selectedSerieId, setSelectedSerieId] = useState<string | null>(
     report.series[0]?.id || null,
   );
@@ -234,22 +235,21 @@ function ChartUsersView({ chartData, report, date }: ChartUsersViewProps) {
     setSelectedBreakdownId(null);
   };
 
+  const profilesQueryInput = {
+    projectId: report.projectId,
+    date: date,
+    series:
+      selectedReportSerie && selectedReportSerie.type === 'event'
+        ? [selectedReportSerie]
+        : [],
+    breakdowns: selectedBreakdown?.event.breakdowns,
+    interval: report.interval,
+  };
+
   const profilesQuery = useQuery(
-    trpc.chart.getProfiles.queryOptions(
-      {
-        projectId: report.projectId,
-        date: date,
-        series:
-          selectedReportSerie && selectedReportSerie.type === 'event'
-            ? [selectedReportSerie]
-            : [],
-        breakdowns: selectedBreakdown?.event.breakdowns,
-        interval: report.interval,
-      },
-      {
-        enabled: !!selectedReportSerie && selectedReportSerie.type === 'event',
-      },
-    ),
+    trpc.chart.getProfiles.queryOptions(profilesQueryInput, {
+      enabled: !!selectedReportSerie && selectedReportSerie.type === 'event',
+    }),
   );
 
   const profiles = profilesQuery.data ?? [];
@@ -260,8 +260,15 @@ function ChartUsersView({ chartData, report, date }: ChartUsersViewProps) {
         ? selectedReportSerie.displayName || selectedReportSerie.name
         : 'serie';
     const day = new Date(date).toISOString().slice(0, 10);
+    // Re-fetch with last_seen attached; the on-screen list skips it.
+    const all = await queryClient.fetchQuery(
+      trpc.chart.getProfiles.queryOptions({
+        ...profilesQueryInput,
+        includeLastSeen: true,
+      }),
+    );
     downloadCSV(
-      profilesToCSV(profiles),
+      profilesToCSV(all),
       `${slugify(serieName)}-users-${day}.csv`,
     );
   };
@@ -389,6 +396,7 @@ function FunnelUsersView({ report, stepIndex, breakdownValues }: FunnelUsersView
       trpc.chart.getFunnelProfiles.queryOptions({
         ...queryInput,
         limit: EXPORT_LIMIT,
+        includeLastSeen: true,
       }),
     );
     const step = report.series[stepIndex];
