@@ -17,6 +17,7 @@ import {
   getProfilePropertySelect,
   getProfilesCached,
   getProfilesLastSeen,
+  type LastSeenScope,
   getReportById,
   getSelectPropertyKey,
   getSettingsForProject,
@@ -61,21 +62,48 @@ function utc(date: string | Date) {
 
 const cacher = cacheMiddleware(60);
 
-// Upper bound for the funnel "View Users" CSV export. Profiles are looked up
-// in batches of 500 ids, so this is ~100 ClickHouse queries at the cap.
-const FUNNEL_PROFILES_EXPORT_LIMIT = 50_000;
+// Upper bound for the funnel "View Users" CSV export. Profile rows are
+// fetched by id in batches of 500; measured on prod that costs anywhere
+// from ~130MB to ~1.6GB read per 1,000 ids depending on how many partitions
+// the ids touch, so the cap bounds the worst case to ~16GB / ~20 queries.
+// Mixpanel caps its report CSV exports at 10,000 rows too.
+const FUNNEL_PROFILES_EXPORT_LIMIT = 10_000;
 
 // Mixpanel's user export carries $last_seen; only the CSV path asks for it,
-// the on-screen list does not need the extra summary-MV round trip.
+// the on-screen list does not need the extra summary-MV round trip. The
+// lookup is scoped to the report's events and window (see
+// getProfilesLastSeen for why that is required, not optional).
 async function attachLastSeen<T extends { id: string }>(
   profiles: T[],
   projectId: string,
+  scope: LastSeenScope,
 ): Promise<Array<T & { lastSeen: Date | null }>> {
   const lastSeen = await getProfilesLastSeen(
     profiles.map((p) => p.id),
     projectId,
+    scope,
   );
   return profiles.map((p) => ({ ...p, lastSeen: lastSeen.get(p.id) ?? null }));
+}
+
+const INTERVAL_MS: Record<string, number> = {
+  minute: 60_000,
+  hour: 3_600_000,
+  day: 86_400_000,
+  week: 7 * 86_400_000,
+  month: 31 * 86_400_000,
+};
+const ONE_DAY_MS = 86_400_000;
+
+// The summary MV is day-grained (event_date = toStartOfDay). Widen a chart
+// bucket by a day on each side so timezone offsets and sub-day intervals
+// still land inside the pruned range.
+function chartBucketScope(date: Date, interval: string): Pick<LastSeenScope, 'startDate' | 'endDate'> {
+  const span = INTERVAL_MS[interval] ?? ONE_DAY_MS;
+  return {
+    startDate: formatClickhouseDate(new Date(date.getTime() - ONE_DAY_MS)),
+    endDate: formatClickhouseDate(new Date(date.getTime() + span + ONE_DAY_MS)),
+  };
 }
 
 const chartProcedure = publicProcedure.use(
@@ -902,7 +930,10 @@ export const chartRouter = createTRPCRouter({
       }
 
       return input.includeLastSeen
-        ? attachLastSeen(profiles, projectId)
+        ? attachLastSeen(profiles, projectId, {
+            eventNames: serie.name === '*' ? [] : [serie.name],
+            ...chartBucketScope(dateObj, input.interval),
+          })
         : profiles;
     }),
 
@@ -987,7 +1018,13 @@ export const chartRouter = createTRPCRouter({
       }
 
       return input.includeLastSeen
-        ? attachLastSeen(profiles, projectId)
+        ? attachLastSeen(profiles, projectId, {
+            eventNames: series.flatMap((s) =>
+              s.type === 'event' ? [s.name] : [],
+            ),
+            startDate,
+            endDate,
+          })
         : profiles;
     }),
 });

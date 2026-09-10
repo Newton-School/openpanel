@@ -171,21 +171,39 @@ export async function getProfiles(ids: string[], projectId: string) {
 
 export const getProfilesCached = cacheable(getProfiles, 60 * 5);
 
+export interface LastSeenScope {
+  /** Event names to consider; empty = any event. */
+  eventNames: string[];
+  /** ClickHouse-formatted bounds (YYYY-MM-DD HH:MM:SS). */
+  startDate: string;
+  endDate: string;
+}
+
 /**
- * Last event time per profile, read from the per-profile summary MV rather
- * than the events table. Used by the "View Users" CSV export (Mixpanel's
- * user export carries $last_seen). Profiles with no summarised events are
- * absent from the map.
+ * Last time each profile performed one of the given events inside the given
+ * window, from the per-profile summary MV. Used by the "View Users" CSV
+ * export as its `last_seen` column.
+ *
+ * The scope is mandatory on purpose: the MV is keyed
+ * (project_id, name, event_date, profile_id), so a lookup by profile id
+ * alone scans the whole project (measured on prod: 105M rows, up to 4.7s per
+ * 500-id batch). With names and dates in the WHERE the primary key prunes
+ * it to the report's own granules (same lookup: 0.66M rows, 27ms).
+ * Profiles with no matching row are absent from the map.
  */
 export async function getProfilesLastSeen(
   ids: string[],
   projectId: string,
+  scope: LastSeenScope,
 ): Promise<Map<string, Date>> {
   const filteredIds = uniq(ids.filter((id) => id !== ''));
   const result = new Map<string, Date>();
   if (filteredIds.length === 0) {
     return result;
   }
+  const nameFilter = scope.eventNames.length
+    ? `AND name IN (${scope.eventNames.map((n) => sqlstring.escape(n)).join(',')})`
+    : '';
   // Keep each IN list well under max_query_size.
   const BATCH_SIZE = 500;
   for (let i = 0; i < filteredIds.length; i += BATCH_SIZE) {
@@ -194,6 +212,8 @@ export async function getProfilesLastSeen(
       `SELECT profile_id, maxMerge(last_event_time) AS last_seen
        FROM ${TABLE_NAMES.event_profile_summary_mv}
        WHERE project_id = ${sqlstring.escape(projectId)}
+         ${nameFilter}
+         AND event_date BETWEEN toDateTime(${sqlstring.escape(scope.startDate)}) AND toDateTime(${sqlstring.escape(scope.endDate)})
          AND profile_id IN (${batch.map((id) => sqlstring.escape(id)).join(',')})
        GROUP BY profile_id`,
     );

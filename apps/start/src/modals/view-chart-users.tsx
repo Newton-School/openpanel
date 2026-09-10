@@ -26,7 +26,7 @@ import { ModalHeader } from './Modal/Container';
 import { ScrollableModal, useScrollableModal } from './Modal/scrollable-modal';
 
 // Matches FUNNEL_PROFILES_EXPORT_LIMIT on the getFunnelProfiles procedure.
-const EXPORT_LIMIT = 50_000;
+const EXPORT_LIMIT = 10_000;
 
 function slugify(value: string): string {
   return value
