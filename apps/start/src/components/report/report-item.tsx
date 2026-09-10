@@ -11,6 +11,7 @@ import { cn } from '@/utils/cn';
 import { canExportReport, exportReportCsv } from '@/utils/report-export';
 import { useQueryClient } from '@tanstack/react-query';
 import { CopyIcon, DownloadIcon, MoreHorizontal, Trash } from 'lucide-react';
+import { useState } from 'react';
 import { toast } from 'sonner';
 
 import { timeWindows } from '@openpanel/constants';
@@ -60,10 +61,13 @@ export function ReportItem({
   const chartRange = report.range;
   const trpc = useTRPC();
   const queryClient = useQueryClient();
+  const [isExporting, setIsExporting] = useState(false);
 
   // Same input the card's ReportChart uses (dashboard-level range overrides),
   // so the export is served from the chart's cached query.
   const handleExportCsv = async () => {
+    if (isExporting) return;
+    setIsExporting(true);
     try {
       await exportReportCsv({
         trpc,
@@ -80,6 +84,8 @@ export function ReportItem({
       toast.error('Export failed', {
         description: 'Nothing was downloaded. Try again in a moment.',
       });
+    } finally {
+      setIsExporting(false);
     }
   };
 
@@ -168,8 +174,9 @@ export function ReportItem({
               <MoreHorizontal size={16} />
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-[200px]">
-              {canExportReport(report.chartType) && (
+              {canExportReport(report) && (
                 <DropdownMenuItem
+                  disabled={isExporting}
                   onClick={(event) => {
                     event.stopPropagation();
                     handleExportCsv();

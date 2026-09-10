@@ -1,7 +1,15 @@
+// Text cells starting with these are read as formulas by Excel and Sheets.
+// Breakdown values and profile properties are end-user supplied, so a tracked
+// value like `=HYPERLINK(...)` would become a live formula in the export.
+const FORMULA_LEADERS = /^[=+\-@\t\r]/;
+
 function escapeCsvValue(value: string | number | null | undefined): string {
   if (value === null || value === undefined) return '';
-  const str = String(value);
-  if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+  let str = String(value);
+  if (typeof value === 'string' && FORMULA_LEADERS.test(str)) {
+    str = `'${str}`;
+  }
+  if (/[",\n\r]/.test(str)) {
     return `"${str.replace(/"/g, '""')}"`;
   }
   return str;
@@ -203,6 +211,31 @@ export function funnelToCSV(
       ? breakdownNames.map((_, i) => serie.breakdowns[i] ?? '')
       : ['Overall'];
     return [...labels, ...serie.steps.map((step) => step.count)];
+  });
+  return buildCSV([header, ...rows]);
+}
+
+type AggregateCsvSerie = {
+  names: string[];
+  metrics: { sum: number };
+};
+
+/**
+ * Pie and bar charts plot one aggregated value per series (chart.aggregate),
+ * so their export is one row per series with a single Value column.
+ */
+export function aggregateToCSV(
+  series: AggregateCsvSerie[],
+  breakdownNames: string[],
+): string {
+  const header = ['Serie', ...breakdownNames, 'Value'];
+  const rows = series.map((serie) => {
+    const [label = '', ...breakdownValues] = serie.names;
+    return [
+      label,
+      ...breakdownNames.map((_, i) => breakdownValues[i] ?? ''),
+      serie.metrics.sum,
+    ];
   });
   return buildCSV([header, ...rows]);
 }

@@ -25,7 +25,7 @@ export function ReportExportButton() {
   const queryClient = useQueryClient();
   const [isExporting, setIsExporting] = useState(false);
 
-  if (!report.ready || !canExportReport(report.chartType)) {
+  if (!report.ready || !canExportReport(report)) {
     return null;
   }
 
