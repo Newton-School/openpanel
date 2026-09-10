@@ -15,13 +15,14 @@ import type { IChartData } from '@/trpc/client';
 import { cn } from '@/utils/cn';
 import { downloadCSV, profilesToCSV } from '@/utils/csv-download';
 import { getProfileName } from '@/utils/getters';
+import { timeWindows } from '@openpanel/constants';
 import type { IReportInput } from '@openpanel/validation';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { DownloadIcon } from 'lucide-react';
+import { DownloadIcon, TargetIcon } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
-import { popModal } from '.';
+import { popModal, pushModal } from '.';
 import { ModalHeader } from './Modal/Container';
 import { ScrollableModal, useScrollableModal } from './Modal/scrollable-modal';
 
@@ -427,6 +428,59 @@ function FunnelUsersView({ report, stepIndex, breakdownValues }: FunnelUsersView
     }
   };
 
+  const handleCreateCohort = () => {
+    const eventSeries = report.series.filter((s) => s.type === 'event');
+    const step = report.series[stepIndex];
+    const stepName =
+      step?.type === 'event' ? step.displayName || step.name : `step ${stepIndex + 1}`;
+    // Same wording Mixpanel prefills: name says the step, description names
+    // the report, spells the steps out and pins the time range.
+    const stepsText = eventSeries
+      .map((s) => (s.type === 'event' ? `did "${s.displayName || s.name}"` : ''))
+      .filter(Boolean)
+      .join(' then ');
+    const outcome = showDropoffs ? 'dropped off after' : 'completed';
+    const breakdownPart = breakdownValues?.length
+      ? ` (${breakdownValues.join(', ')})`
+      : '';
+    const timeRange =
+      report.startDate && report.endDate
+        ? `Between ${report.startDate.slice(0, 10)} and ${report.endDate.slice(0, 10)}`
+        : timeWindows[report.range]?.label ?? report.range;
+    pushModal('AddCohort', {
+      name: `Users who ${outcome} step ${stepIndex + 1} (${stepName})${breakdownPart}`,
+      description: `Funnel report: ${report.name || 'Unnamed report'}. Users who ${stepsText}. Time range: ${timeRange}.`,
+      definition: {
+        type: 'funnel',
+        criteria: {
+          series: eventSeries.map((s) =>
+            s.type === 'event'
+              ? {
+                  id: s.id,
+                  type: 'event' as const,
+                  name: s.name,
+                  displayName: s.displayName,
+                  segment: s.segment,
+                  filters: s.filters,
+                  property: s.property,
+                }
+              : // narrowed above; keeps the map total for TypeScript
+                { type: 'event' as const, name: '', filters: [] },
+          ),
+          stepIndex,
+          showDropoffs,
+          funnelWindow: queryInput.funnelWindow,
+          funnelGroup: queryInput.funnelGroup,
+          breakdowns: report.breakdowns ?? [],
+          breakdownValues: breakdownValues ?? [],
+          range: report.range,
+          startDate: report.startDate,
+          endDate: report.endDate,
+        },
+      },
+    });
+  };
+
   return (
     <ScrollableModal
       header={
@@ -468,7 +522,16 @@ function FunnelUsersView({ report, stepIndex, breakdownValues }: FunnelUsersView
               </button>
             </>
             )}
-            <div className="ml-auto">
+            <div className="ml-auto flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={profilesQuery.isLoading || profiles.length === 0}
+                onClick={handleCreateCohort}
+              >
+                <TargetIcon className="mr-2 size-4" />
+                Create cohort
+              </Button>
               <DownloadCsvButton
                 count={profiles.length}
                 disabled={profilesQuery.isLoading || profiles.length === 0}

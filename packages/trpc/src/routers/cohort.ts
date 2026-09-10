@@ -21,8 +21,67 @@ import {
 } from '@openpanel/validation';
 
 import { getProjectAccess } from '../access';
-import { TRPCAccessError, TRPCNotFoundError } from '../errors';
+import {
+  TRPCAccessError,
+  TRPCBadRequestError,
+  TRPCNotFoundError,
+} from '../errors';
 import { createTRPCRouter, protectedProcedure } from '../trpc';
+
+// Cohort names are unique per project (case-insensitive), as in Mixpanel.
+// This is also what stops a second "Create cohort" click on the same funnel
+// step from producing a duplicate: the prefilled name already exists.
+async function assertCohortNameAvailable(projectId: string, name: string) {
+  const clash = await db.cohort.findFirst({
+    where: { projectId, name: { equals: name.trim(), mode: 'insensitive' } },
+    select: { id: true, name: true },
+  });
+  if (clash) {
+    throw TRPCBadRequestError(
+      `A cohort named "${clash.name}" already exists in this project`,
+    );
+  }
+}
+
+// Newton fork: cap on cohorts per project. Unlike Mixpanel, which evaluates
+// cohorts at query time, every non-static cohort here is recomputed by the
+// worker every 30 minutes, so cohorts are not free to accumulate. Env-tunable
+// on the API pod. Delete or freeze old cohorts to make room.
+const MAX_COHORTS_PER_PROJECT_RAW = Number.parseInt(
+  process.env.MAX_COHORTS_PER_PROJECT ?? '250',
+  10,
+);
+const MAX_COHORTS_PER_PROJECT =
+  Number.isNaN(MAX_COHORTS_PER_PROJECT_RAW) || MAX_COHORTS_PER_PROJECT_RAW < 1
+    ? 250
+    : MAX_COHORTS_PER_PROJECT_RAW;
+
+// The unique index on (projectId, name) is the backstop for the check above
+// (two creates racing, or writes that bypass the API). Turn Prisma's P2002
+// into the same user-facing error.
+function rethrowDuplicateName(name: string) {
+  return (err: unknown): never => {
+    if (
+      typeof err === 'object' &&
+      err !== null &&
+      (err as { code?: string }).code === 'P2002'
+    ) {
+      throw TRPCBadRequestError(
+        `A cohort named "${name}" already exists in this project`,
+      );
+    }
+    throw err;
+  };
+}
+
+async function assertCohortCapacity(projectId: string) {
+  const count = await db.cohort.count({ where: { projectId } });
+  if (count >= MAX_COHORTS_PER_PROJECT) {
+    throw TRPCBadRequestError(
+      `This project already has ${count} cohorts, the maximum is ${MAX_COHORTS_PER_PROJECT} (MAX_COHORTS_PER_PROJECT). Delete cohorts you no longer need to create new ones.`,
+    );
+  }
+}
 
 export const cohortRouter = createTRPCRouter({
   list: protectedProcedure
@@ -74,15 +133,19 @@ export const cohortRouter = createTRPCRouter({
   create: protectedProcedure
     .input(zCohortInput)
     .mutation(async ({ input }) => {
-      const cohort = await db.cohort.create({
-        data: {
-          name: input.name,
-          description: input.description,
-          projectId: input.projectId,
-          definition: input.definition,
-          isStatic: input.isStatic,
-        },
-      });
+      await assertCohortNameAvailable(input.projectId, input.name);
+      await assertCohortCapacity(input.projectId);
+      const cohort = await db.cohort
+        .create({
+          data: {
+            name: input.name,
+            description: input.description,
+            projectId: input.projectId,
+            definition: input.definition,
+            isStatic: input.isStatic,
+          },
+        })
+        .catch(rethrowDuplicateName(input.name));
 
       await enqueueCohortCompute(cohort.id);
 
@@ -109,17 +172,23 @@ export const cohortRouter = createTRPCRouter({
         throw TRPCAccessError('You do not have access to this cohort');
       }
 
-      const cohort = await db.cohort.update({
-        where: { id },
-        data: {
-          ...(data.name && { name: data.name }),
-          ...(data.description !== undefined && {
-            description: data.description,
-          }),
-          ...(data.definition && { definition: data.definition }),
-          ...(data.isStatic !== undefined && { isStatic: data.isStatic }),
-        },
-      });
+      if (data.name && data.name !== existingCohort.name) {
+        await assertCohortNameAvailable(existingCohort.projectId, data.name);
+      }
+
+      const cohort = await db.cohort
+        .update({
+          where: { id },
+          data: {
+            ...(data.name && { name: data.name }),
+            ...(data.description !== undefined && {
+              description: data.description,
+            }),
+            ...(data.definition && { definition: data.definition }),
+            ...(data.isStatic !== undefined && { isStatic: data.isStatic }),
+          },
+        })
+        .catch(rethrowDuplicateName(data.name ?? existingCohort.name));
 
       if (data.definition) {
         await enqueueCohortCompute(cohort.id);

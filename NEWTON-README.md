@@ -17,6 +17,7 @@ for defaults and which pod reads each one.
 |---|---|---|---|
 | `VIEW_USERS_EXPORT_LIMIT` | api | 10000 | Max users in a "View Users" CSV export (funnel step or chart point). The on-screen list stays at 1,000. |
 | `COHORT_MATERIALIZE_LIMIT` | worker, api | 10000 | Max members stored per cohort compute. Worker heap is ~250-300MB per 1M members. Set on both pods. |
+| `MAX_COHORTS_PER_PROJECT` | api | 250 | Max cohorts per project, checked on create. Bounds the 30-minute recompute fan-out; freeze or delete cohorts to stay under it. |
 | `COHORT_QUERY_SPILL_BYTES` | worker, api | 314572800 | GROUP BY spill threshold for property cohorts. |
 | `NEWTON_RESOLVE_PROFILE` | api, worker | unset | `1` reads windowed aggregations through `events_resolved` (anonymous -> identified folding). |
 | `NEWTON_FUNNEL_STRICT_INCREASE` | api | unset | `1` restores strict step ordering in funnels (default matches Mixpanel's non-strict). |
