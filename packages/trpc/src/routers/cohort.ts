@@ -56,6 +56,24 @@ const MAX_COHORTS_PER_PROJECT =
     ? 250
     : MAX_COHORTS_PER_PROJECT_RAW;
 
+// The unique index on (projectId, name) is the backstop for the check above
+// (two creates racing, or writes that bypass the API). Turn Prisma's P2002
+// into the same user-facing error.
+function rethrowDuplicateName(name: string) {
+  return (err: unknown): never => {
+    if (
+      typeof err === 'object' &&
+      err !== null &&
+      (err as { code?: string }).code === 'P2002'
+    ) {
+      throw TRPCBadRequestError(
+        `A cohort named "${name}" already exists in this project`,
+      );
+    }
+    throw err;
+  };
+}
+
 async function assertCohortCapacity(projectId: string) {
   const count = await db.cohort.count({ where: { projectId } });
   if (count >= MAX_COHORTS_PER_PROJECT) {
@@ -117,15 +135,17 @@ export const cohortRouter = createTRPCRouter({
     .mutation(async ({ input }) => {
       await assertCohortNameAvailable(input.projectId, input.name);
       await assertCohortCapacity(input.projectId);
-      const cohort = await db.cohort.create({
-        data: {
-          name: input.name,
-          description: input.description,
-          projectId: input.projectId,
-          definition: input.definition,
-          isStatic: input.isStatic,
-        },
-      });
+      const cohort = await db.cohort
+        .create({
+          data: {
+            name: input.name,
+            description: input.description,
+            projectId: input.projectId,
+            definition: input.definition,
+            isStatic: input.isStatic,
+          },
+        })
+        .catch(rethrowDuplicateName(input.name));
 
       await enqueueCohortCompute(cohort.id);
 
@@ -156,17 +176,19 @@ export const cohortRouter = createTRPCRouter({
         await assertCohortNameAvailable(existingCohort.projectId, data.name);
       }
 
-      const cohort = await db.cohort.update({
-        where: { id },
-        data: {
-          ...(data.name && { name: data.name }),
-          ...(data.description !== undefined && {
-            description: data.description,
-          }),
-          ...(data.definition && { definition: data.definition }),
-          ...(data.isStatic !== undefined && { isStatic: data.isStatic }),
-        },
-      });
+      const cohort = await db.cohort
+        .update({
+          where: { id },
+          data: {
+            ...(data.name && { name: data.name }),
+            ...(data.description !== undefined && {
+              description: data.description,
+            }),
+            ...(data.definition && { definition: data.definition }),
+            ...(data.isStatic !== undefined && { isStatic: data.isStatic }),
+          },
+        })
+        .catch(rethrowDuplicateName(data.name ?? existingCohort.name));
 
       if (data.definition) {
         await enqueueCohortCompute(cohort.id);
