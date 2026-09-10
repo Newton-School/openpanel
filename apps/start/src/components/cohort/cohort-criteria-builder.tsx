@@ -3,6 +3,7 @@ import { ComboboxAdvanced } from '@/components/ui/combobox-advanced';
 import { DropdownMenuComposed } from '@/components/ui/dropdown-menu';
 import { useAppParams } from '@/hooks/use-app-params';
 import { useEventNames } from '@/hooks/use-event-names';
+import { timeWindows } from '@openpanel/constants';
 import type {
   CohortDefinition,
   EventBasedCohortDefinition,
@@ -96,7 +97,7 @@ export function describeFunnelCohort(definition: FunnelCohortDefinition) {
   const when =
     criteria.startDate && criteria.endDate
       ? `${criteria.startDate.slice(0, 10)} to ${criteria.endDate.slice(0, 10)}`
-      : `range ${criteria.range}`;
+      : (timeWindows[criteria.range as keyof typeof timeWindows]?.label ?? criteria.range);
   const breakdown = criteria.breakdownValues.length
     ? `, ${criteria.breakdowns.map((b) => b.name).join(', ')} = ${criteria.breakdownValues.join(', ')}`
     : '';

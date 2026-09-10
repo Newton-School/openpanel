@@ -21,8 +21,27 @@ import {
 } from '@openpanel/validation';
 
 import { getProjectAccess } from '../access';
-import { TRPCAccessError, TRPCNotFoundError } from '../errors';
+import {
+  TRPCAccessError,
+  TRPCBadRequestError,
+  TRPCNotFoundError,
+} from '../errors';
 import { createTRPCRouter, protectedProcedure } from '../trpc';
+
+// Cohort names are unique per project (case-insensitive), as in Mixpanel.
+// This is also what stops a second "Create cohort" click on the same funnel
+// step from producing a duplicate: the prefilled name already exists.
+async function assertCohortNameAvailable(projectId: string, name: string) {
+  const clash = await db.cohort.findFirst({
+    where: { projectId, name: { equals: name.trim(), mode: 'insensitive' } },
+    select: { id: true, name: true },
+  });
+  if (clash) {
+    throw TRPCBadRequestError(
+      `A cohort named "${clash.name}" already exists in this project`,
+    );
+  }
+}
 
 export const cohortRouter = createTRPCRouter({
   list: protectedProcedure
@@ -74,6 +93,7 @@ export const cohortRouter = createTRPCRouter({
   create: protectedProcedure
     .input(zCohortInput)
     .mutation(async ({ input }) => {
+      await assertCohortNameAvailable(input.projectId, input.name);
       const cohort = await db.cohort.create({
         data: {
           name: input.name,
@@ -107,6 +127,10 @@ export const cohortRouter = createTRPCRouter({
 
       if (!access) {
         throw TRPCAccessError('You do not have access to this cohort');
+      }
+
+      if (data.name && data.name !== existingCohort.name) {
+        await assertCohortNameAvailable(existingCohort.projectId, data.name);
       }
 
       const cohort = await db.cohort.update({

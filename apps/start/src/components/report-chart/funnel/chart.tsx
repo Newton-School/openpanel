@@ -131,6 +131,7 @@ export function Tables({
   const {
     report: {
       projectId,
+      name: reportName,
       startDate,
       endDate,
       range,
@@ -155,6 +156,7 @@ export function Tables({
       type: 'funnel',
       report: {
         projectId,
+        name: reportName,
         series: reportSeries,
         breakdowns: reportBreakdowns || [],
         interval: interval || 'day',

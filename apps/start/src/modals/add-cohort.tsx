@@ -6,6 +6,7 @@ import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 import { useAppParams } from '@/hooks/use-app-params';
+import { useCohorts } from '@/hooks/use-cohorts';
 import { handleError, useTRPC } from '@/integrations/trpc/react';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
@@ -39,7 +40,7 @@ export default function AddCohort(props: AddCohortProps = {}) {
   const queryClient = useQueryClient();
   const isPrefilled = !!props.definition;
 
-  const { register, handleSubmit, formState, control } = useForm<IForm>({
+  const { register, handleSubmit, formState, control, watch } = useForm<IForm>({
     resolver: zodResolver(validator),
     defaultValues: {
       name: props.name ?? '',
@@ -54,6 +55,15 @@ export default function AddCohort(props: AddCohortProps = {}) {
       isStatic: false,
     },
   });
+
+  // Names are unique per project (the server enforces it too). Surfacing it
+  // here is what stops a second "Create cohort" click from a report making a
+  // duplicate: the prefilled name is already taken, so Create is disabled.
+  const existingCohorts = useCohorts({ projectId, includeCount: false });
+  const typedName = watch('name').trim().toLowerCase();
+  const nameTaken =
+    typedName.length > 0 &&
+    existingCohorts.some((c) => c.name.trim().toLowerCase() === typedName);
 
   const mutation = useMutation(
     trpc.cohort.create.mutationOptions({
@@ -82,6 +92,7 @@ export default function AddCohort(props: AddCohortProps = {}) {
         <InputWithLabel
           label="Name"
           placeholder="Name of the cohort"
+          error={nameTaken ? 'Name already exists' : undefined}
           {...register('name')}
         />
 
@@ -127,7 +138,10 @@ export default function AddCohort(props: AddCohortProps = {}) {
           <Button type="button" variant="outline" onClick={() => popModal()}>
             Cancel
           </Button>
-          <Button type="submit" disabled={!formState.isDirty && !isPrefilled}>
+          <Button
+            type="submit"
+            disabled={nameTaken || (!formState.isDirty && !isPrefilled)}
+          >
             Create
           </Button>
         </ButtonContainer>

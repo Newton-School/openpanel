@@ -15,6 +15,7 @@ import type { IChartData } from '@/trpc/client';
 import { cn } from '@/utils/cn';
 import { downloadCSV, profilesToCSV } from '@/utils/csv-download';
 import { getProfileName } from '@/utils/getters';
+import { timeWindows } from '@openpanel/constants';
 import type { IReportInput } from '@openpanel/validation';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useVirtualizer } from '@tanstack/react-virtual';
@@ -432,17 +433,23 @@ function FunnelUsersView({ report, stepIndex, breakdownValues }: FunnelUsersView
     const step = report.series[stepIndex];
     const stepName =
       step?.type === 'event' ? step.displayName || step.name : `step ${stepIndex + 1}`;
-    const funnelName = eventSeries
-      .map((s) => (s.type === 'event' ? s.displayName || s.name : ''))
+    // Same wording Mixpanel prefills: name says the step, description names
+    // the report, spells the steps out and pins the time range.
+    const stepsText = eventSeries
+      .map((s) => (s.type === 'event' ? `did "${s.displayName || s.name}"` : ''))
       .filter(Boolean)
-      .join(' → ');
-    const outcome = showDropoffs ? 'Dropped after' : 'Completed';
+      .join(' then ');
+    const outcome = showDropoffs ? 'dropped off after' : 'completed';
     const breakdownPart = breakdownValues?.length
       ? ` (${breakdownValues.join(', ')})`
       : '';
+    const timeRange =
+      report.startDate && report.endDate
+        ? `Between ${report.startDate.slice(0, 10)} and ${report.endDate.slice(0, 10)}`
+        : timeWindows[report.range]?.label ?? report.range;
     pushModal('AddCohort', {
-      name: `${outcome} ${stepName}${breakdownPart}`,
-      description: `Users who ${showDropoffs ? 'dropped off after' : 'completed'} step ${stepIndex + 1} of funnel ${funnelName}`,
+      name: `Users who ${outcome} step ${stepIndex + 1} (${stepName})${breakdownPart}`,
+      description: `Funnel report: ${report.name || 'Unnamed report'}. Users who ${stepsText}. Time range: ${timeRange}.`,
       definition: {
         type: 'funnel',
         criteria: {
