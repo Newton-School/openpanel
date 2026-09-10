@@ -16,6 +16,8 @@ import {
   getGroupPropertySelect,
   getProfilePropertySelect,
   getProfilesCached,
+  getProfilesLastSeen,
+  type LastSeenScope,
   getReportById,
   getSelectPropertyKey,
   getSettingsForProject,
@@ -59,6 +61,59 @@ function utc(date: string | Date) {
 }
 
 const cacher = cacheMiddleware(60);
+
+// Newton fork: upper bound on users in a "View Users" CSV export (funnel
+// step or chart point). Profile rows are fetched by id in batches of 500;
+// measured on prod that costs ~130MB to ~1.6GB read per 1,000 ids depending
+// on how many partitions the ids touch, so the cap bounds one export to
+// roughly (limit / 1,000) * 1.6GB worst case. Env-tunable on the API pod so
+// it can be raised without an image rebuild; the default matches Mixpanel's
+// own 10,000-row CSV cap. The on-screen list is separate and stays at 1,000.
+const VIEW_USERS_EXPORT_LIMIT_RAW = Number.parseInt(
+  process.env.VIEW_USERS_EXPORT_LIMIT ?? '10000',
+  10,
+);
+const VIEW_USERS_EXPORT_LIMIT =
+  Number.isNaN(VIEW_USERS_EXPORT_LIMIT_RAW) || VIEW_USERS_EXPORT_LIMIT_RAW < 1
+    ? 10_000
+    : VIEW_USERS_EXPORT_LIMIT_RAW;
+
+// Mixpanel's user export carries $last_seen; only the CSV path asks for it,
+// the on-screen list does not need the extra summary-MV round trip. The
+// lookup is scoped to the report's events and window (see
+// getProfilesLastSeen for why that is required, not optional).
+async function attachLastSeen<T extends { id: string }>(
+  profiles: T[],
+  projectId: string,
+  scope: LastSeenScope,
+): Promise<Array<T & { lastSeen: Date | null }>> {
+  const lastSeen = await getProfilesLastSeen(
+    profiles.map((p) => p.id),
+    projectId,
+    scope,
+  );
+  return profiles.map((p) => ({ ...p, lastSeen: lastSeen.get(p.id) ?? null }));
+}
+
+const INTERVAL_MS: Record<string, number> = {
+  minute: 60_000,
+  hour: 3_600_000,
+  day: 86_400_000,
+  week: 7 * 86_400_000,
+  month: 31 * 86_400_000,
+};
+const ONE_DAY_MS = 86_400_000;
+
+// The summary MV is day-grained (event_date = toStartOfDay). Widen a chart
+// bucket by a day on each side so timezone offsets and sub-day intervals
+// still land inside the pruned range.
+function chartBucketScope(date: Date, interval: string): Pick<LastSeenScope, 'startDate' | 'endDate'> {
+  const span = INTERVAL_MS[interval] ?? ONE_DAY_MS;
+  return {
+    startDate: formatClickhouseDate(new Date(date.getTime() - ONE_DAY_MS)),
+    endDate: formatClickhouseDate(new Date(date.getTime() + span + ONE_DAY_MS)),
+  };
+}
 
 const chartProcedure = publicProcedure.use(
   async ({ ctx, next, getRawInput }) => {
@@ -798,6 +853,12 @@ export const chartRouter = createTRPCRouter({
         interval: zTimeInterval.default('day'),
         series: zChartSeries,
         breakdowns: z.record(z.string(), z.string()).optional(),
+        forExport: z
+          .boolean()
+          .optional()
+          .describe(
+            'CSV export: cap at VIEW_USERS_EXPORT_LIMIT and attach last_seen.'
+          ),
       })
     )
     .query(async ({ input }) => {
@@ -869,11 +930,14 @@ export const chartRouter = createTRPCRouter({
       // Get unique profile IDs
       const profileIds = await chQuery<{ profile_id: string }>(getSql());
       if (profileIds.length === 0) {
-        return [];
+        return { profiles: [], truncated: false, limit: null };
       }
 
       // Fetch profile details in batches to avoid exceeding ClickHouse max_query_size
-      const ids = profileIds.map((p) => p.profile_id).filter(Boolean);
+      const allIds = profileIds.map((p) => p.profile_id).filter(Boolean);
+      const truncated =
+        !!input.forExport && allIds.length > VIEW_USERS_EXPORT_LIMIT;
+      const ids = truncated ? allIds.slice(0, VIEW_USERS_EXPORT_LIMIT) : allIds;
       const BATCH_SIZE = 200;
       const profiles: IServiceProfile[] = [];
       for (let i = 0; i < ids.length; i += BATCH_SIZE) {
@@ -882,7 +946,17 @@ export const chartRouter = createTRPCRouter({
         profiles.push(...batchProfiles);
       }
 
-      return profiles;
+      if (!input.forExport) {
+        return { profiles, truncated: false, limit: null };
+      }
+      return {
+        profiles: await attachLastSeen(profiles, projectId, {
+          eventNames: serie.name === '*' ? [] : [serie.name],
+          ...chartBucketScope(dateObj, input.interval),
+        }),
+        truncated,
+        limit: VIEW_USERS_EXPORT_LIMIT,
+      };
     }),
 
   getFunnelProfiles: protectedProcedure
@@ -905,6 +979,12 @@ export const chartRouter = createTRPCRouter({
         breakdowns: z.array(z.object({ name: z.string() })).optional(),
         breakdownValues: z.array(z.string()).optional(),
         range: zRange,
+        forExport: z
+          .boolean()
+          .optional()
+          .describe(
+            'CSV export: lift the on-screen cap to VIEW_USERS_EXPORT_LIMIT and attach last_seen.'
+          ),
       })
     )
     .query(async ({ input }) => {
@@ -918,7 +998,10 @@ export const chartRouter = createTRPCRouter({
         funnelGroup,
         breakdowns = [],
         breakdownValues = [],
+        forExport = false,
       } = input;
+      // The export asks for one more than the cap so truncation is detectable.
+      const limit = forExport ? VIEW_USERS_EXPORT_LIMIT + 1 : undefined;
 
       const { startDate, endDate } = getChartStartEndDate(input, timezone);
 
@@ -937,23 +1020,40 @@ export const chartRouter = createTRPCRouter({
         funnelWindow,
         funnelGroup,
         timezone,
+        limit,
       });
 
       if (ids.length === 0) {
-        return [];
+        return { profiles: [], truncated: false, limit: null };
       }
+
+      const truncated = forExport && ids.length > VIEW_USERS_EXPORT_LIMIT;
+      const exportIds = truncated ? ids.slice(0, VIEW_USERS_EXPORT_LIMIT) : ids;
 
       // Fetch profile details in batches to avoid exceeding ClickHouse max_query_size
       // when there are many profile IDs to pass in the IN(...) clause
       const BATCH_SIZE = 500;
       const profiles: IServiceProfile[] = [];
-      for (let i = 0; i < ids.length; i += BATCH_SIZE) {
-        const batch = ids.slice(i, i + BATCH_SIZE);
+      for (let i = 0; i < exportIds.length; i += BATCH_SIZE) {
+        const batch = exportIds.slice(i, i + BATCH_SIZE);
         const batchProfiles = await getProfilesCached(batch, projectId);
         profiles.push(...batchProfiles);
       }
 
-      return profiles;
+      if (!forExport) {
+        return { profiles, truncated: false, limit: null };
+      }
+      return {
+        profiles: await attachLastSeen(profiles, projectId, {
+          eventNames: series.flatMap((s) =>
+            s.type === 'event' ? [s.name] : [],
+          ),
+          startDate,
+          endDate,
+        }),
+        truncated,
+        limit: VIEW_USERS_EXPORT_LIMIT,
+      };
     }),
 });
 

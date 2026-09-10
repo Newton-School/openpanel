@@ -1,33 +1,15 @@
 name: Docker Build and Push
 
+# Newton fork: manual-only. Upstream runs this on every push, but for the
+# fork it serves nothing: the image push steps are gated on refs/heads/main
+# (our default branch is newton-main), our images are built by the
+# `openpanel` CodeBuild project on pushes to newton-main, and the test job
+# fails at the ClickHouse migrations because migration 18 needs the
+# device_alias dictionary from its admin runbook, which CI does not run.
+# Kept in place (not deleted) so upstream syncs conflict on a few lines
+# instead of silently re-enabling it. Trigger by hand if ever needed.
 on:
   workflow_dispatch:
-  push:
-    paths-ignore:
-      # README and docs
-      - "**/README*"
-      - "**/readme*"
-      - "**/*.md"
-      - "**/docs/**"
-      - "**/CHANGELOG*"
-      - "**/LICENSE*"
-      # Test files
-      - "**/*.test.*"
-      - "**/*.spec.*"
-      - "**/__tests__/**"
-      - "**/tests/**"
-      # SDKs (published separately)
-      - "packages/sdks/**"
-      # Public app (docs/marketing, not part of Docker deploy)
-      - "apps/public/**"
-      # Dev / tooling
-      - "**/.vscode/**"
-      - "**/.cursor/**"
-      - "**/.env.example"
-      - "**/.env.*.example"
-      - "**/.gitignore"
-      - "**/.eslintignore"
-      - "**/.prettierignore"
 
 env:
   repo_owner: "openpanel-dev"
