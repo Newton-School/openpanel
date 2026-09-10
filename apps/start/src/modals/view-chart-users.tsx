@@ -53,7 +53,9 @@ function DownloadCsvButton({
         try {
           await onDownload();
         } catch {
-          toast.error('Failed to download users');
+          toast.error('Export failed', {
+            description: 'Nothing was downloaded. Try again in a moment.',
+          });
         } finally {
           setIsDownloading(false);
         }
@@ -259,12 +261,15 @@ function ChartUsersView({ chartData, report, date }: ChartUsersViewProps) {
     const day = new Date(date).toISOString().slice(0, 10);
     // Export path: server applies VIEW_USERS_EXPORT_LIMIT and attaches
     // last_seen; the on-screen list skips both.
-    const result = await queryClient.fetchQuery(
-      trpc.chart.getProfiles.queryOptions({
+    // One attempt per click: an export can run for minutes, and a retried
+    // request would only queue a second full export behind the first.
+    const result = await queryClient.fetchQuery({
+      ...trpc.chart.getProfiles.queryOptions({
         ...profilesQueryInput,
         forExport: true,
       }),
-    );
+      retry: false,
+    });
     downloadCSV(
       profilesToCSV(result.profiles),
       `${slugify(serieName)}-users-${day}.csv`,
@@ -395,12 +400,15 @@ function FunnelUsersView({ report, stepIndex, breakdownValues }: FunnelUsersView
   const handleDownload = async () => {
     // The list above is capped for rendering; re-run as an export so the
     // server lifts the cap to VIEW_USERS_EXPORT_LIMIT and attaches last_seen.
-    const result = await queryClient.fetchQuery(
-      trpc.chart.getFunnelProfiles.queryOptions({
+    // One attempt per click: an export can run for minutes, and a retried
+    // request would only queue a second full export behind the first.
+    const result = await queryClient.fetchQuery({
+      ...trpc.chart.getFunnelProfiles.queryOptions({
         ...queryInput,
         forExport: true,
       }),
-    );
+      retry: false,
+    });
     const step = report.series[stepIndex];
     const stepName =
       step?.type === 'event' ? step.displayName || step.name : `step-${stepIndex + 1}`;
