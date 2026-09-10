@@ -119,7 +119,9 @@ export function PureCohortFilterItem({
           <SlidersHorizontal size={10} />
         </ColorSquare>
         <div className="flex flex-1">
-          <RenderDots truncate>{filter.name}</RenderDots>
+          {/* filter.name is the internal `cohort:<id>` key; the cohort itself
+              is shown in the picker below, so the header just names the type. */}
+          <RenderDots truncate>Cohort</RenderDots>
         </div>
         <Button variant="ghost" size="sm" onClick={removeFilter}>
           <Trash size={16} />

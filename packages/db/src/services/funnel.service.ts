@@ -7,13 +7,17 @@ import { TABLE_NAMES } from '../clickhouse/client';
 import { clix } from '../clickhouse/query-builder';
 import { createSqlBuilder } from '../sql-builder';
 import {
+  buildAllCohortsLabelExpr,
+  buildAllCohortsMembershipQuery,
   buildInlineCohortJoin,
   collectCohortIds,
   collectProfilePropertyKeys,
   extractCohortId,
   fetchCohortsMetadata,
+  fetchProjectCohorts,
   getEventFiltersWhereClause,
   getSelectPropertyKey,
+  isAllCohortsBreakdown,
   profilePropertiesCteSelect,
   rewriteProfilePropertyRefs,
 } from './chart.service';
@@ -91,12 +95,16 @@ export class FunnelService {
     const windowFunnelMode =
       process.env.NEWTON_FUNNEL_STRICT_INCREASE === '1' ? ", 'strict_increase'" : '';
 
+    // Qualify profile_id/session_id with the `events` alias: every cohort join
+    // (single-cohort LEFT ANY JOIN, all-cohorts INNER JOIN) also exposes a
+    // profile_id column, and with two or more of them ClickHouse rejects the
+    // bare identifier as ambiguous.
     return clix(this.client, timezone)
       .select([
-        primaryKey,
+        `events.${primaryKey} AS ${primaryKey}`,
         `windowFunnel(${funnelWindowMilliseconds}${windowFunnelMode})(toUInt64(toUnixTimestamp64Milli(created_at)), ${funnels.join(', ')}) AS level`,
         ...(group === 'session_id'
-          ? ['argMax(profile_id, created_at) AS profile_id']
+          ? ['argMax(events.profile_id, created_at) AS profile_id']
           : []),
         ...additionalSelects,
       ])
@@ -117,7 +125,7 @@ export class FunnelService {
         eventSeries.map((e) => e.name),
       )
       .rawWhere(`(${funnels.map((f) => `(${f})`).join(' OR ')})`)
-      .groupBy([primaryKey, ...additionalGroupBy]);
+      .groupBy([`events.${primaryKey}`, ...additionalGroupBy]);
   }
 
   buildSessionsCte({
@@ -272,6 +280,12 @@ export class FunnelService {
     const allFilters = eventSeries.flatMap((e) => e.filters ?? []);
     const cohortIds = collectCohortIds(allFilters, breakdowns);
     const cohortMetadata = await fetchCohortsMetadata(cohortIds);
+    const hasAllCohortsBreakdown = breakdowns.some((b) =>
+      isAllCohortsBreakdown(b.name),
+    );
+    const allCohorts = hasAllCohortsBreakdown
+      ? await fetchProjectCohorts(projectId)
+      : [];
 
     // Newton fork: join only the referenced profile-property keys as scalar
     // columns instead of every profile's whole properties Map (multi-GiB on the
@@ -299,6 +313,15 @@ export class FunnelService {
     ).map((c) => rewriteProfilePropertyRefs(c, profileProps.keys));
     const firstStepCondition = funnelConditions[0]!;
     const breakdownSelects = breakdowns.map((b, index) => {
+      if (isAllCohortsBreakdown(b.name)) {
+        // "All cohorts" is not an event property, so there is nothing to read
+        // at the entry step. Membership comes from the _all_cohorts INNER JOIN
+        // below, and cohort_id is added to the windowFunnel GROUP BY: it is
+        // constant across a user's events, so the sequence stays intact, and a
+        // user in N cohorts is counted once in each of the N buckets (same
+        // semantics as the chart's INNER JOIN in getChartSql).
+        return `${buildAllCohortsLabelExpr(allCohorts)} as b_${index}`;
+      }
       const bId = extractCohortId(b.name);
       const bName = bId ? cohortMetadata.get(bId)?.name : undefined;
       const expr = rewriteProfilePropertyRefs(
@@ -316,6 +339,9 @@ export class FunnelService {
       funnelWindowMilliseconds,
       timezone,
       additionalSelects: breakdownSelects,
+      additionalGroupBy: hasAllCohortsBreakdown
+        ? ['_all_cohorts.cohort_id']
+        : [],
       group,
       profilePropertyKeys: profileProps.keys,
     });
@@ -357,6 +383,16 @@ export class FunnelService {
     if (needsGroupArrayJoin) {
       funnelCte.rawJoin('ARRAY JOIN groups AS _group_id');
       funnelCte.rawJoin('LEFT ANY JOIN _g ON _g.id = _group_id');
+    }
+
+    if (hasAllCohortsBreakdown) {
+      // Inline subquery, same shape as buildInlineCohortJoin. Referencing the
+      // membership as a named CTE from inside the funnel CTE makes the
+      // analyzer report the unqualified `profile_id` in the select list as
+      // ambiguous; the subquery form does not.
+      funnelCte.rawJoin(
+        `INNER JOIN (${buildAllCohortsMembershipQuery(projectId)}) AS _all_cohorts ON _all_cohorts.profile_id = events.profile_id`,
+      );
     }
 
     for (const cohortId of cohortIds) {
