@@ -5,12 +5,16 @@ import sqlstring from 'sqlstring';
 import { TABLE_NAMES, ch } from '../clickhouse/client';
 import { clix } from '../clickhouse/query-builder';
 import {
+  buildAllCohortsLabelExpr,
+  buildAllCohortsMembershipQuery,
   buildInlineCohortJoin,
   collectCohortIds,
   extractCohortId,
   fetchCohortsMetadata,
+  fetchProjectCohorts,
   getEventFiltersWhereClause,
   getSelectPropertyKey,
+  isAllCohortsBreakdown,
 } from './chart.service';
 import { onlyReportEvents } from './reports.service';
 
@@ -40,11 +44,29 @@ export class ConversionService {
     );
     const cohortIds = collectCohortIds(allFilters, breakdowns);
     const cohortMetadata = await fetchCohortsMetadata(cohortIds);
-    const cohortJoinsSql = cohortIds
-      .map((id) => buildInlineCohortJoin(id, projectId, 'events'))
+    const hasAllCohortsBreakdown = breakdowns.some((b) =>
+      isAllCohortsBreakdown(b.name),
+    );
+    const allCohorts = hasAllCohortsBreakdown
+      ? await fetchProjectCohorts(projectId)
+      : [];
+    // Same shape as the funnel: membership is per profile, so grouping the
+    // windowFunnel by cohort_id keeps sequences intact and counts a user once
+    // per cohort they belong to.
+    const allCohortsJoinSql = hasAllCohortsBreakdown
+      ? `INNER JOIN (${buildAllCohortsMembershipQuery(projectId)}) AS _all_cohorts ON _all_cohorts.profile_id = events.profile_id`
+      : '';
+    const cohortJoinsSql = [
+      allCohortsJoinSql,
+      ...cohortIds.map((id) => buildInlineCohortJoin(id, projectId, 'events')),
+    ]
+      .filter(Boolean)
       .join(' ');
 
     const breakdownExpressions = breakdowns.map((b) => {
+      if (isAllCohortsBreakdown(b.name)) {
+        return buildAllCohortsLabelExpr(allCohorts);
+      }
       const bId = extractCohortId(b.name);
       const bName = bId ? cohortMetadata.get(bId)?.name : undefined;
       return getSelectPropertyKey(b.name, projectId, bId ?? undefined, bName);
