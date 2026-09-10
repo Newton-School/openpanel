@@ -26,17 +26,25 @@ const validator = z.object({
 
 type IForm = z.infer<typeof validator>;
 
-export default function AddCohort() {
+interface AddCohortProps {
+  /** Prefill, e.g. when created from a report's View Users modal. */
+  name?: string;
+  description?: string;
+  definition?: CohortDefinition;
+}
+
+export default function AddCohort(props: AddCohortProps = {}) {
   const { projectId } = useAppParams();
   const trpc = useTRPC();
   const queryClient = useQueryClient();
+  const isPrefilled = !!props.definition;
 
   const { register, handleSubmit, formState, control } = useForm<IForm>({
     resolver: zodResolver(validator),
     defaultValues: {
-      name: '',
-      description: '',
-      definition: {
+      name: props.name ?? '',
+      description: props.description ?? '',
+      definition: props.definition ?? {
         type: 'event',
         criteria: {
           events: [],
@@ -119,7 +127,7 @@ export default function AddCohort() {
           <Button type="button" variant="outline" onClick={() => popModal()}>
             Cancel
           </Button>
-          <Button type="submit" disabled={!formState.isDirty}>
+          <Button type="submit" disabled={!formState.isDirty && !isPrefilled}>
             Create
           </Button>
         </ButtonContainer>

@@ -95,9 +95,49 @@ export type PropertyBasedCohortDefinition = z.infer<
   typeof zPropertyBasedCohortDefinition
 >;
 
+// Local mirror of the event series item in ./index.ts (same TDZ reason as
+// zChartEventFilter above). Only the fields the funnel query reads.
+const zFunnelCohortSeriesItem = z.object({
+  id: z.string().optional(),
+  type: z.literal('event'),
+  name: z.string(),
+  displayName: z.string().nullish(),
+  segment: z.string().optional(),
+  filters: z.array(zChartEventFilter).default([]),
+  property: z.string().nullish(),
+});
+
+/**
+ * "Users at a funnel step": the same inputs the funnel report's View Users
+ * modal sends, stored so the cohort recomputes against the live funnel.
+ * A relative `range` (e.g. 30d) moves with time on every refresh; explicit
+ * startDate/endDate pin it. Freeze with isStatic for a one-time snapshot.
+ */
+export const zFunnelCohortDefinition = z.object({
+  type: z.literal('funnel'),
+  criteria: z.object({
+    series: z.array(zFunnelCohortSeriesItem).min(1),
+    stepIndex: z.number().int().min(0).describe('0-based funnel step'),
+    showDropoffs: z
+      .boolean()
+      .default(false)
+      .describe('true = dropped after this step, false = completed it'),
+    funnelWindow: z.number().optional(),
+    funnelGroup: z.string().optional(),
+    breakdowns: z.array(z.object({ name: z.string() })).default([]),
+    breakdownValues: z.array(z.string()).default([]),
+    range: z.string(),
+    startDate: z.string().nullish(),
+    endDate: z.string().nullish(),
+  }),
+});
+
+export type FunnelCohortDefinition = z.infer<typeof zFunnelCohortDefinition>;
+
 export const zCohortDefinition = z.discriminatedUnion('type', [
   zEventBasedCohortDefinition,
   zPropertyBasedCohortDefinition,
+  zFunnelCohortDefinition,
 ]);
 
 export type CohortDefinition = z.infer<typeof zCohortDefinition>;

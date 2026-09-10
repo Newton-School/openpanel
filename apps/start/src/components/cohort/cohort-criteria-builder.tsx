@@ -7,6 +7,7 @@ import type {
   CohortDefinition,
   EventBasedCohortDefinition,
   EventCriteria,
+  FunnelCohortDefinition,
   IChartEventFilter,
   IChartEventFilterOperator,
   IChartEventFilterValue,
@@ -42,6 +43,13 @@ export function CohortCriteriaBuilder({
     }
   };
 
+  // Funnel cohorts are created from a funnel report's View Users modal and
+  // carry the report's steps verbatim. They are shown, not edited: change
+  // the report and create a new cohort instead.
+  if (definition.type === 'funnel') {
+    return <FunnelCohortSummary definition={definition} />;
+  }
+
   return (
     <div className="flex flex-col gap-4">
       <div className="flex gap-2">
@@ -74,6 +82,51 @@ export function CohortCriteriaBuilder({
       {definition.type === 'property' && (
         <PropertyBasedBuilder definition={definition} onChange={onChange} />
       )}
+    </div>
+  );
+}
+
+export function describeFunnelCohort(definition: FunnelCohortDefinition) {
+  const { criteria } = definition;
+  const stepNames = criteria.series.map((s) => s.displayName || s.name);
+  const step = stepNames[criteria.stepIndex] ?? `step ${criteria.stepIndex + 1}`;
+  const outcome = criteria.showDropoffs
+    ? `dropped off after step ${criteria.stepIndex + 1} (${step})`
+    : `completed step ${criteria.stepIndex + 1} (${step})`;
+  const when =
+    criteria.startDate && criteria.endDate
+      ? `${criteria.startDate.slice(0, 10)} to ${criteria.endDate.slice(0, 10)}`
+      : `range ${criteria.range}`;
+  const breakdown = criteria.breakdownValues.length
+    ? `, ${criteria.breakdowns.map((b) => b.name).join(', ')} = ${criteria.breakdownValues.join(', ')}`
+    : '';
+  return {
+    funnel: stepNames.join(' → '),
+    outcome,
+    when,
+    breakdown,
+  };
+}
+
+function FunnelCohortSummary({
+  definition,
+}: {
+  definition: FunnelCohortDefinition;
+}) {
+  const d = describeFunnelCohort(definition);
+  return (
+    <div className="rounded-lg border bg-def-100 p-4 text-sm flex flex-col gap-1">
+      <div className="font-medium">Users who {d.outcome}</div>
+      <div className="text-muted-foreground">Funnel: {d.funnel}</div>
+      <div className="text-muted-foreground">
+        Window: {d.when}
+        {d.breakdown}
+      </div>
+      <div className="text-muted-foreground mt-2">
+        Created from a funnel report. Membership is recomputed against the
+        live funnel on every refresh; freeze the snapshot to keep it fixed.
+        To change the steps, adjust the report and create a new cohort.
+      </div>
     </div>
   );
 }

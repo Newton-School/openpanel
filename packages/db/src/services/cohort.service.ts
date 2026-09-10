@@ -4,7 +4,9 @@ import type {
   EventBasedCohortDefinition,
   EventCriteria,
   Frequency,
+  FunnelCohortDefinition,
   IChartEventFilter,
+  IReportInput,
   PropertyBasedCohortDefinition,
   Timeframe,
 } from '@openpanel/validation';
@@ -18,6 +20,9 @@ import {
   currentCohortMembersSql,
   RESOLVED_PROFILE_ID_SQL,
 } from './profile-resolution';
+import { getChartStartEndDate } from './date.service';
+import { funnelService } from './funnel.service';
+import { getSettingsForProject } from './organization.service';
 import { getProfiles, type IServiceProfile } from './profile.service';
 
 // Newton fork: max members materialized into cohort_members per compute,
@@ -556,6 +561,50 @@ export async function getCohortCount(
   return result[0]?.count || 0;
 }
 
+/**
+ * Funnel cohorts reuse the exact query behind the funnel report's View Users
+ * modal, so the cohort holds the same users the chart shows for that step.
+ * A relative range is re-anchored to now on every compute.
+ */
+export async function computeFunnelCohort(
+  projectId: string,
+  definition: FunnelCohortDefinition,
+  limit?: number,
+): Promise<string[]> {
+  const { criteria } = definition;
+  const { timezone } = await getSettingsForProject(projectId);
+  const { startDate, endDate } = getChartStartEndDate(
+    {
+      startDate: criteria.startDate ?? null,
+      endDate: criteria.endDate ?? null,
+      range: criteria.range as IReportInput['range'],
+    },
+    timezone,
+  );
+  // The stored series is a trimmed mirror of the report series schema; the
+  // funnel builder only reads name/filters (and id for step lookup).
+  const series = criteria.series.map((s) => ({
+    ...s,
+    segment: (s.segment ?? 'event') as 'event',
+    filters: s.filters ?? [],
+  })) as IReportInput['series'];
+
+  return funnelService.getFunnelProfileIds({
+    projectId,
+    startDate,
+    endDate,
+    series,
+    stepIndex: criteria.stepIndex,
+    showDropoffs: criteria.showDropoffs,
+    breakdowns: criteria.breakdowns,
+    breakdownValues: criteria.breakdownValues,
+    funnelWindow: criteria.funnelWindow,
+    funnelGroup: criteria.funnelGroup,
+    timezone,
+    limit,
+  });
+}
+
 export async function computeCohort(
   projectId: string,
   definition: CohortDefinition,
@@ -566,6 +615,9 @@ export async function computeCohort(
   }
   if (definition.type === 'property') {
     return computePropertyBasedCohort(projectId, definition, limit);
+  }
+  if (definition.type === 'funnel') {
+    return computeFunnelCohort(projectId, definition, limit);
   }
   return [];
 }
@@ -579,6 +631,15 @@ export async function countCohort(
   }
   if (definition.type === 'property') {
     return countPropertyBasedCohort(projectId, definition);
+  }
+  if (definition.type === 'funnel') {
+    // Same cap as materialization; the funnel query has no count variant.
+    const ids = await computeFunnelCohort(
+      projectId,
+      definition,
+      COHORT_MATERIALIZE_LIMIT,
+    );
+    return ids.length;
   }
   return 0;
 }
