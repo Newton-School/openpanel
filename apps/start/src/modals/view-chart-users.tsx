@@ -25,9 +25,6 @@ import { popModal } from '.';
 import { ModalHeader } from './Modal/Container';
 import { ScrollableModal, useScrollableModal } from './Modal/scrollable-modal';
 
-// Matches FUNNEL_PROFILES_EXPORT_LIMIT on the getFunnelProfiles procedure.
-const EXPORT_LIMIT = 10_000;
-
 function slugify(value: string): string {
   return value
     .toLowerCase()
@@ -252,7 +249,7 @@ function ChartUsersView({ chartData, report, date }: ChartUsersViewProps) {
     }),
   );
 
-  const profiles = profilesQuery.data ?? [];
+  const profiles = profilesQuery.data?.profiles ?? [];
 
   const handleDownload = async () => {
     const serieName =
@@ -260,17 +257,23 @@ function ChartUsersView({ chartData, report, date }: ChartUsersViewProps) {
         ? selectedReportSerie.displayName || selectedReportSerie.name
         : 'serie';
     const day = new Date(date).toISOString().slice(0, 10);
-    // Re-fetch with last_seen attached; the on-screen list skips it.
-    const all = await queryClient.fetchQuery(
+    // Export path: server applies VIEW_USERS_EXPORT_LIMIT and attaches
+    // last_seen; the on-screen list skips both.
+    const result = await queryClient.fetchQuery(
       trpc.chart.getProfiles.queryOptions({
         ...profilesQueryInput,
-        includeLastSeen: true,
+        forExport: true,
       }),
     );
     downloadCSV(
-      profilesToCSV(all),
+      profilesToCSV(result.profiles),
       `${slugify(serieName)}-users-${day}.csv`,
     );
+    if (result.truncated && result.limit) {
+      toast.warning(
+        `Export capped at ${result.limit.toLocaleString()} users (VIEW_USERS_EXPORT_LIMIT)`,
+      );
+    }
   };
 
   return (
@@ -386,17 +389,16 @@ function FunnelUsersView({ report, stepIndex, breakdownValues }: FunnelUsersView
     }),
   );
 
-  const profiles = profilesQuery.data ?? [];
+  const profiles = profilesQuery.data?.profiles ?? [];
   const isLastStep = stepIndex === report.series.length - 1;
 
   const handleDownload = async () => {
-    // The list above is capped for rendering; re-run with the export cap so
-    // the file has every user behind the step.
-    const all = await queryClient.fetchQuery(
+    // The list above is capped for rendering; re-run as an export so the
+    // server lifts the cap to VIEW_USERS_EXPORT_LIMIT and attaches last_seen.
+    const result = await queryClient.fetchQuery(
       trpc.chart.getFunnelProfiles.queryOptions({
         ...queryInput,
-        limit: EXPORT_LIMIT,
-        includeLastSeen: true,
+        forExport: true,
       }),
     );
     const step = report.series[stepIndex];
@@ -407,11 +409,13 @@ function FunnelUsersView({ report, stepIndex, breakdownValues }: FunnelUsersView
       ? `-${slugify(breakdownValues.join('-'))}`
       : '';
     downloadCSV(
-      profilesToCSV(all),
+      profilesToCSV(result.profiles),
       `funnel-step-${stepIndex + 1}-${slugify(stepName)}-${suffix}${breakdownPart}.csv`,
     );
-    if (all.length >= EXPORT_LIMIT) {
-      toast.warning(`Export capped at ${EXPORT_LIMIT.toLocaleString()} users`);
+    if (result.truncated && result.limit) {
+      toast.warning(
+        `Export capped at ${result.limit.toLocaleString()} users (VIEW_USERS_EXPORT_LIMIT)`,
+      );
     }
   };
 

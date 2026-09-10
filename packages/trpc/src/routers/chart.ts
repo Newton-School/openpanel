@@ -62,12 +62,21 @@ function utc(date: string | Date) {
 
 const cacher = cacheMiddleware(60);
 
-// Upper bound for the funnel "View Users" CSV export. Profile rows are
-// fetched by id in batches of 500; measured on prod that costs anywhere
-// from ~130MB to ~1.6GB read per 1,000 ids depending on how many partitions
-// the ids touch, so the cap bounds the worst case to ~16GB / ~20 queries.
-// Mixpanel caps its report CSV exports at 10,000 rows too.
-const FUNNEL_PROFILES_EXPORT_LIMIT = 10_000;
+// Newton fork: upper bound on users in a "View Users" CSV export (funnel
+// step or chart point). Profile rows are fetched by id in batches of 500;
+// measured on prod that costs ~130MB to ~1.6GB read per 1,000 ids depending
+// on how many partitions the ids touch, so the cap bounds one export to
+// roughly (limit / 1,000) * 1.6GB worst case. Env-tunable on the API pod so
+// it can be raised without an image rebuild; the default matches Mixpanel's
+// own 10,000-row CSV cap. The on-screen list is separate and stays at 1,000.
+const VIEW_USERS_EXPORT_LIMIT_RAW = Number.parseInt(
+  process.env.VIEW_USERS_EXPORT_LIMIT ?? '10000',
+  10,
+);
+const VIEW_USERS_EXPORT_LIMIT =
+  Number.isNaN(VIEW_USERS_EXPORT_LIMIT_RAW) || VIEW_USERS_EXPORT_LIMIT_RAW < 1
+    ? 10_000
+    : VIEW_USERS_EXPORT_LIMIT_RAW;
 
 // Mixpanel's user export carries $last_seen; only the CSV path asks for it,
 // the on-screen list does not need the extra summary-MV round trip. The
@@ -844,7 +853,12 @@ export const chartRouter = createTRPCRouter({
         interval: zTimeInterval.default('day'),
         series: zChartSeries,
         breakdowns: z.record(z.string(), z.string()).optional(),
-        includeLastSeen: z.boolean().optional(),
+        forExport: z
+          .boolean()
+          .optional()
+          .describe(
+            'CSV export: cap at VIEW_USERS_EXPORT_LIMIT and attach last_seen.'
+          ),
       })
     )
     .query(async ({ input }) => {
@@ -916,11 +930,14 @@ export const chartRouter = createTRPCRouter({
       // Get unique profile IDs
       const profileIds = await chQuery<{ profile_id: string }>(getSql());
       if (profileIds.length === 0) {
-        return [];
+        return { profiles: [], truncated: false, limit: null };
       }
 
       // Fetch profile details in batches to avoid exceeding ClickHouse max_query_size
-      const ids = profileIds.map((p) => p.profile_id).filter(Boolean);
+      const allIds = profileIds.map((p) => p.profile_id).filter(Boolean);
+      const truncated =
+        !!input.forExport && allIds.length > VIEW_USERS_EXPORT_LIMIT;
+      const ids = truncated ? allIds.slice(0, VIEW_USERS_EXPORT_LIMIT) : allIds;
       const BATCH_SIZE = 200;
       const profiles: IServiceProfile[] = [];
       for (let i = 0; i < ids.length; i += BATCH_SIZE) {
@@ -929,12 +946,17 @@ export const chartRouter = createTRPCRouter({
         profiles.push(...batchProfiles);
       }
 
-      return input.includeLastSeen
-        ? attachLastSeen(profiles, projectId, {
-            eventNames: serie.name === '*' ? [] : [serie.name],
-            ...chartBucketScope(dateObj, input.interval),
-          })
-        : profiles;
+      if (!input.forExport) {
+        return { profiles, truncated: false, limit: null };
+      }
+      return {
+        profiles: await attachLastSeen(profiles, projectId, {
+          eventNames: serie.name === '*' ? [] : [serie.name],
+          ...chartBucketScope(dateObj, input.interval),
+        }),
+        truncated,
+        limit: VIEW_USERS_EXPORT_LIMIT,
+      };
     }),
 
   getFunnelProfiles: protectedProcedure
@@ -957,16 +979,12 @@ export const chartRouter = createTRPCRouter({
         breakdowns: z.array(z.object({ name: z.string() })).optional(),
         breakdownValues: z.array(z.string()).optional(),
         range: zRange,
-        limit: z
-          .number()
-          .int()
-          .min(1)
-          .max(FUNNEL_PROFILES_EXPORT_LIMIT)
+        forExport: z
+          .boolean()
           .optional()
           .describe(
-            'Max profiles to return. The modal uses the default; CSV export raises it.'
+            'CSV export: lift the on-screen cap to VIEW_USERS_EXPORT_LIMIT and attach last_seen.'
           ),
-        includeLastSeen: z.boolean().optional(),
       })
     )
     .query(async ({ input }) => {
@@ -980,8 +998,10 @@ export const chartRouter = createTRPCRouter({
         funnelGroup,
         breakdowns = [],
         breakdownValues = [],
-        limit,
+        forExport = false,
       } = input;
+      // The export asks for one more than the cap so truncation is detectable.
+      const limit = forExport ? VIEW_USERS_EXPORT_LIMIT + 1 : undefined;
 
       const { startDate, endDate } = getChartStartEndDate(input, timezone);
 
@@ -1004,28 +1024,36 @@ export const chartRouter = createTRPCRouter({
       });
 
       if (ids.length === 0) {
-        return [];
+        return { profiles: [], truncated: false, limit: null };
       }
+
+      const truncated = forExport && ids.length > VIEW_USERS_EXPORT_LIMIT;
+      const exportIds = truncated ? ids.slice(0, VIEW_USERS_EXPORT_LIMIT) : ids;
 
       // Fetch profile details in batches to avoid exceeding ClickHouse max_query_size
       // when there are many profile IDs to pass in the IN(...) clause
       const BATCH_SIZE = 500;
       const profiles: IServiceProfile[] = [];
-      for (let i = 0; i < ids.length; i += BATCH_SIZE) {
-        const batch = ids.slice(i, i + BATCH_SIZE);
+      for (let i = 0; i < exportIds.length; i += BATCH_SIZE) {
+        const batch = exportIds.slice(i, i + BATCH_SIZE);
         const batchProfiles = await getProfilesCached(batch, projectId);
         profiles.push(...batchProfiles);
       }
 
-      return input.includeLastSeen
-        ? attachLastSeen(profiles, projectId, {
-            eventNames: series.flatMap((s) =>
-              s.type === 'event' ? [s.name] : [],
-            ),
-            startDate,
-            endDate,
-          })
-        : profiles;
+      if (!forExport) {
+        return { profiles, truncated: false, limit: null };
+      }
+      return {
+        profiles: await attachLastSeen(profiles, projectId, {
+          eventNames: series.flatMap((s) =>
+            s.type === 'event' ? [s.name] : [],
+          ),
+          startDate,
+          endDate,
+        }),
+        truncated,
+        limit: VIEW_USERS_EXPORT_LIMIT,
+      };
     }),
 });
 
