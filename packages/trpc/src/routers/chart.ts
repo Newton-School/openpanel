@@ -60,6 +60,10 @@ function utc(date: string | Date) {
 
 const cacher = cacheMiddleware(60);
 
+// Upper bound for the funnel "View Users" CSV export. Profiles are looked up
+// in batches of 500 ids, so this is ~100 ClickHouse queries at the cap.
+const FUNNEL_PROFILES_EXPORT_LIMIT = 50_000;
+
 const chartProcedure = publicProcedure.use(
   async ({ ctx, next, getRawInput }) => {
     const rawInput = (await getRawInput()) as {
@@ -905,6 +909,15 @@ export const chartRouter = createTRPCRouter({
         breakdowns: z.array(z.object({ name: z.string() })).optional(),
         breakdownValues: z.array(z.string()).optional(),
         range: zRange,
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(FUNNEL_PROFILES_EXPORT_LIMIT)
+          .optional()
+          .describe(
+            'Max profiles to return. The modal uses the default; CSV export raises it.'
+          ),
       })
     )
     .query(async ({ input }) => {
@@ -918,6 +931,7 @@ export const chartRouter = createTRPCRouter({
         funnelGroup,
         breakdowns = [],
         breakdownValues = [],
+        limit,
       } = input;
 
       const { startDate, endDate } = getChartStartEndDate(input, timezone);
@@ -937,6 +951,7 @@ export const chartRouter = createTRPCRouter({
         funnelWindow,
         funnelGroup,
         timezone,
+        limit,
       });
 
       if (ids.length === 0) {

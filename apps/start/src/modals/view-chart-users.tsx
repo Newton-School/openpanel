@@ -1,6 +1,7 @@
 import { ProjectLink } from '@/components/links';
 import { ProfileAvatar } from '@/components/profiles/profile-avatar';
 import { SerieIcon } from '@/components/report-chart/common/serie-icon';
+import { Button } from '@/components/ui/button';
 import { DropdownMenuShortcut } from '@/components/ui/dropdown-menu';
 import {
   Select,
@@ -12,14 +13,60 @@ import {
 import { useTRPC } from '@/integrations/trpc/react';
 import type { IChartData } from '@/trpc/client';
 import { cn } from '@/utils/cn';
+import { downloadCSV, profilesToCSV } from '@/utils/csv-download';
 import { getProfileName } from '@/utils/getters';
 import type { IReportInput } from '@openpanel/validation';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useVirtualizer } from '@tanstack/react-virtual';
+import { DownloadIcon } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
+import { toast } from 'sonner';
 import { popModal } from '.';
 import { ModalHeader } from './Modal/Container';
 import { ScrollableModal, useScrollableModal } from './Modal/scrollable-modal';
+
+// Matches FUNNEL_PROFILES_EXPORT_LIMIT on the getFunnelProfiles procedure.
+const EXPORT_LIMIT = 50_000;
+
+function slugify(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 60);
+}
+
+function DownloadCsvButton({
+  count,
+  disabled,
+  onDownload,
+}: {
+  count: number;
+  disabled?: boolean;
+  onDownload: () => Promise<void>;
+}) {
+  const [isDownloading, setIsDownloading] = useState(false);
+  return (
+    <Button
+      variant="outline"
+      size="sm"
+      disabled={disabled || isDownloading}
+      onClick={async () => {
+        setIsDownloading(true);
+        try {
+          await onDownload();
+        } catch {
+          toast.error('Failed to download users');
+        } finally {
+          setIsDownloading(false);
+        }
+      }}
+    >
+      <DownloadIcon className="mr-2 size-4" />
+      {isDownloading ? 'Preparing…' : `Download CSV (${count})`}
+    </Button>
+  );
+}
 
 const ProfileItem = ({ profile }: { profile: any }) => {
   return (
@@ -207,6 +254,18 @@ function ChartUsersView({ chartData, report, date }: ChartUsersViewProps) {
 
   const profiles = profilesQuery.data ?? [];
 
+  const handleDownload = async () => {
+    const serieName =
+      selectedReportSerie?.type === 'event'
+        ? selectedReportSerie.displayName || selectedReportSerie.name
+        : 'serie';
+    const day = new Date(date).toISOString().slice(0, 10);
+    downloadCSV(
+      profilesToCSV(profiles),
+      `${slugify(serieName)}-users-${day}.csv`,
+    );
+  };
+
   return (
     <ScrollableModal
       header={
@@ -217,6 +276,11 @@ function ChartUsersView({ chartData, report, date }: ChartUsersViewProps) {
           />
           {report.series.length > 0 && (
             <div className="col md:row gap-2">
+              <DownloadCsvButton
+                count={profiles.length}
+                disabled={profilesQuery.isLoading || profiles.length === 0}
+                onDownload={handleDownload}
+              />
               <Select
                 value={selectedSerieId || ''}
                 onValueChange={handleSerieChange}
@@ -286,37 +350,62 @@ interface FunnelUsersViewProps {
 
 function FunnelUsersView({ report, stepIndex, breakdownValues }: FunnelUsersViewProps) {
   const trpc = useTRPC();
+  const queryClient = useQueryClient();
   const [showDropoffs, setShowDropoffs] = useState(false);
 
+  const queryInput = {
+    projectId: report.projectId,
+    startDate: report.startDate!,
+    endDate: report.endDate!,
+    range: report.range,
+    series: report.series,
+    stepIndex: stepIndex,
+    showDropoffs: showDropoffs,
+    funnelWindow:
+      report.options?.type === 'funnel'
+        ? report.options.funnelWindow
+        : undefined,
+    funnelGroup:
+      report.options?.type === 'funnel'
+        ? report.options.funnelGroup
+        : undefined,
+    breakdowns: report.breakdowns,
+    breakdownValues: breakdownValues,
+  };
+
   const profilesQuery = useQuery(
-    trpc.chart.getFunnelProfiles.queryOptions(
-      {
-        projectId: report.projectId,
-        startDate: report.startDate!,
-        endDate: report.endDate!,
-        range: report.range,
-        series: report.series,
-        stepIndex: stepIndex,
-        showDropoffs: showDropoffs,
-        funnelWindow:
-          report.options?.type === 'funnel'
-            ? report.options.funnelWindow
-            : undefined,
-        funnelGroup:
-          report.options?.type === 'funnel'
-            ? report.options.funnelGroup
-            : undefined,
-        breakdowns: report.breakdowns,
-        breakdownValues: breakdownValues,
-      },
-      {
-        enabled: stepIndex !== undefined,
-      },
-    ),
+    trpc.chart.getFunnelProfiles.queryOptions(queryInput, {
+      enabled: stepIndex !== undefined,
+    }),
   );
 
   const profiles = profilesQuery.data ?? [];
   const isLastStep = stepIndex === report.series.length - 1;
+
+  const handleDownload = async () => {
+    // The list above is capped for rendering; re-run with the export cap so
+    // the file has every user behind the step.
+    const all = await queryClient.fetchQuery(
+      trpc.chart.getFunnelProfiles.queryOptions({
+        ...queryInput,
+        limit: EXPORT_LIMIT,
+      }),
+    );
+    const step = report.series[stepIndex];
+    const stepName =
+      step?.type === 'event' ? step.displayName || step.name : `step-${stepIndex + 1}`;
+    const suffix = showDropoffs ? 'dropped-after' : 'completed';
+    const breakdownPart = breakdownValues?.length
+      ? `-${slugify(breakdownValues.join('-'))}`
+      : '';
+    downloadCSV(
+      profilesToCSV(all),
+      `funnel-step-${stepIndex + 1}-${slugify(stepName)}-${suffix}${breakdownPart}.csv`,
+    );
+    if (all.length >= EXPORT_LIMIT) {
+      toast.warning(`Export capped at ${EXPORT_LIMIT.toLocaleString()} users`);
+    }
+  };
 
   return (
     <ScrollableModal
@@ -330,8 +419,9 @@ function FunnelUsersView({ report, stepIndex, breakdownValues }: FunnelUsersView
                 : `Users who completed step ${stepIndex + 1} of ${report.series.length} in the funnel`
             }
           />
-          {!isLastStep && (
-            <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2">
+            {!isLastStep && (
+            <>
               <button
                 type="button"
                 onClick={() => setShowDropoffs(false)}
@@ -356,8 +446,16 @@ function FunnelUsersView({ report, stepIndex, breakdownValues }: FunnelUsersView
               >
                 Dropped Off
               </button>
+            </>
+            )}
+            <div className="ml-auto">
+              <DownloadCsvButton
+                count={profiles.length}
+                disabled={profilesQuery.isLoading || profiles.length === 0}
+                onDownload={handleDownload}
+              />
             </div>
-          )}
+          </div>
         </div>
       }
     >
