@@ -26,7 +26,8 @@ export function canExportReport(chartType: IReportInput['chartType']) {
  * Download the report's plotted data as CSV. Runs the same tRPC query the
  * chart component runs with the same input, so it is served from the
  * react-query cache when the chart is already on screen and costs nothing
- * extra; otherwise it fetches once.
+ * extra; otherwise it fetches once. Returns the number of rows written; 0
+ * means nothing was downloaded.
  */
 export async function exportReportCsv({
   trpc,
@@ -56,6 +57,9 @@ export async function exportReportCsv({
       ...trpc.chart.funnel.queryOptions(chartInput),
       retry: false,
     });
+    if (res.current.length === 0) {
+      return 0;
+    }
     downloadCSV(funnelToCSV(res.current, breakdownNames), filename);
     return res.current.length;
   }
@@ -64,6 +68,9 @@ export async function exportReportCsv({
     ...trpc.chart.chart.queryOptions(chartInput),
     retry: false,
   });
+  if (res.series.length === 0) {
+    return 0;
+  }
   downloadCSV(chartToCSV(res.series, breakdownNames, dateFormat), filename);
   return res.series.length;
 }
