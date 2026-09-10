@@ -6,8 +6,12 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import { useTRPC } from '@/integrations/trpc/react';
 import { cn } from '@/utils/cn';
-import { CopyIcon, MoreHorizontal, Trash } from 'lucide-react';
+import { canExportReport, exportReportCsv } from '@/utils/report-export';
+import { useQueryClient } from '@tanstack/react-query';
+import { CopyIcon, DownloadIcon, MoreHorizontal, Trash } from 'lucide-react';
+import { toast } from 'sonner';
 
 import { timeWindows } from '@openpanel/constants';
 
@@ -54,6 +58,30 @@ export function ReportItem({
 }) {
   const router = useRouter();
   const chartRange = report.range;
+  const trpc = useTRPC();
+  const queryClient = useQueryClient();
+
+  // Same input the card's ReportChart uses (dashboard-level range overrides),
+  // so the export is served from the chart's cached query.
+  const handleExportCsv = async () => {
+    try {
+      await exportReportCsv({
+        trpc,
+        queryClient,
+        report: {
+          ...report,
+          range: range ?? report.range,
+          startDate: startDate ?? null,
+          endDate: endDate ?? null,
+          interval: interval ?? report.interval,
+        },
+      });
+    } catch {
+      toast.error('Export failed', {
+        description: 'Nothing was downloaded. Try again in a moment.',
+      });
+    }
+  };
 
   return (
     <div className="card h-full flex flex-col">
@@ -140,6 +168,17 @@ export function ReportItem({
               <MoreHorizontal size={16} />
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-[200px]">
+              {canExportReport(report.chartType) && (
+                <DropdownMenuItem
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    handleExportCsv();
+                  }}
+                >
+                  <DownloadIcon size={16} className="mr-2" />
+                  Export CSV
+                </DropdownMenuItem>
+              )}
               <DropdownMenuItem
                 onClick={(event) => {
                   event.stopPropagation();

@@ -121,3 +121,88 @@ export function profilesToCSV(profiles: CsvProfile[]): string {
   });
   return buildCSV([header, ...rows]);
 }
+
+/** Safe, short filename fragment. */
+export function fileSlug(value: string): string {
+  return (
+    value
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 60) || 'report'
+  );
+}
+
+type ChartCsvSerie = {
+  names: string[];
+  data: { date: string; count: number }[];
+};
+
+/**
+ * Chart data as Mixpanel's Insights export lays it out: one row per plotted
+ * series (event x breakdown values), one column per x-axis bucket, cells are
+ * the plotted values. `names[0]` is the series label, the rest are the
+ * breakdown values in the report's breakdown order.
+ */
+export function chartToCSV(
+  series: ChartCsvSerie[],
+  breakdownNames: string[],
+  dateFormat: 'date' | 'datetime' = 'datetime',
+): string {
+  const formatBucket = (date: string) =>
+    dateFormat === 'date' ? date.slice(0, 10) : date;
+  const dates: string[] = [];
+  const seen = new Set<string>();
+  for (const serie of series) {
+    for (const point of serie.data) {
+      if (!seen.has(point.date)) {
+        seen.add(point.date);
+        dates.push(point.date);
+      }
+    }
+  }
+  dates.sort();
+  const header = ['Serie', ...breakdownNames, ...dates.map(formatBucket)];
+  const rows = series.map((serie) => {
+    const byDate = new Map(serie.data.map((d) => [d.date, d.count]));
+    const [label = '', ...breakdownValues] = serie.names;
+    const cells: (string | number)[] = [label];
+    for (let i = 0; i < breakdownNames.length; i += 1) {
+      cells.push(breakdownValues[i] ?? '');
+    }
+    for (const date of dates) {
+      cells.push(byDate.get(date) ?? 0);
+    }
+    return cells;
+  });
+  return buildCSV([header, ...rows]);
+}
+
+type FunnelCsvSerie = {
+  breakdowns: string[];
+  steps: { event: { displayName?: string; name: string }; count: number }[];
+};
+
+/**
+ * Funnel data as Mixpanel's Funnels export lays it out: one row per
+ * breakdown value ("Overall" when there is none), one column per step named
+ * "(n) step", cells are the users who reached that step.
+ */
+export function funnelToCSV(
+  series: FunnelCsvSerie[],
+  breakdownNames: string[],
+): string {
+  const first = series[0];
+  if (!first) return '';
+  const stepHeaders = first.steps.map(
+    (step, index) => `(${index + 1}) ${step.event.displayName || step.event.name}`,
+  );
+  const header = [...(breakdownNames.length ? breakdownNames : ['Breakdown']), ...stepHeaders];
+  const rows = series.map((serie) => {
+    const labels = breakdownNames.length
+      ? breakdownNames.map((_, i) => serie.breakdowns[i] ?? '')
+      : ['Overall'];
+    return [...labels, ...serie.steps.map((step) => step.count)];
+  });
+  return buildCSV([header, ...rows]);
+}
