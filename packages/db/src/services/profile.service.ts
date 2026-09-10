@@ -146,23 +146,42 @@ export async function getProfiles(ids: string[], projectId: string) {
     return [];
   }
 
+  // Newton fork: a profile has one row per update in this ReplacingMergeTree,
+  // and `any()` returned an arbitrary one, so ~6% of profiles (those with an
+  // update history) came back with an old row: missing city, missing custom
+  // properties, stale name. The profile page reads with FINAL and shows the
+  // latest, which is why exports and the View Users list disagreed with it.
+  //
+  // FINAL here costs 4-5GB read per 500-id batch on prod (it merges whole
+  // ranges), against ~1.6GB for the plain scan, so instead pick the newest
+  // row per profile with argMax. The version column, created_at, is the
+  // profile's creation time and ties across updates for ~5% of profiles, so
+  // the tie-break is the row with the most properties: updates merge
+  // properties in, so the fullest row is the latest one. All columns are
+  // taken from that single row (argMax over a tuple), never mixed.
+  const rowKey = '(created_at, length(properties))';
+  const rowTuple =
+    'tuple(nullIf(first_name, \'\'), nullIf(last_name, \'\'), nullIf(email, \'\'), nullIf(avatar, \'\'), is_external, properties, created_at, groups)';
   const data = await chQuery<IClickhouseProfile>(
-    `SELECT 
-      id, 
+    `SELECT
+      id,
       project_id,
-      any(nullIf(first_name, '')) as first_name, 
-      any(nullIf(last_name, '')) as last_name, 
-      any(nullIf(email, '')) as email, 
-      any(nullIf(avatar, '')) as avatar, 
-      last_value(is_external) as is_external, 
-      any(properties) as properties, 
-      any(created_at) as created_at,
-      any(groups) as groups
-    FROM ${TABLE_NAMES.profiles}
-    WHERE 
-      project_id = ${sqlstring.escape(projectId)} AND
-      id IN (${filteredIds.map((id) => sqlstring.escape(id)).join(',')})
-    GROUP BY id, project_id
+      tupleElement(latest, 1) as first_name,
+      tupleElement(latest, 2) as last_name,
+      tupleElement(latest, 3) as email,
+      tupleElement(latest, 4) as avatar,
+      tupleElement(latest, 5) as is_external,
+      tupleElement(latest, 6) as properties,
+      tupleElement(latest, 7) as created_at,
+      tupleElement(latest, 8) as groups
+    FROM (
+      SELECT id, project_id, argMax(${rowTuple}, ${rowKey}) as latest
+      FROM ${TABLE_NAMES.profiles}
+      WHERE
+        project_id = ${sqlstring.escape(projectId)} AND
+        id IN (${filteredIds.map((id) => sqlstring.escape(id)).join(',')})
+      GROUP BY id, project_id
+    )
     `
   );
 
