@@ -43,6 +43,28 @@ async function assertCohortNameAvailable(projectId: string, name: string) {
   }
 }
 
+// Newton fork: cap on cohorts per project. Unlike Mixpanel, which evaluates
+// cohorts at query time, every non-static cohort here is recomputed by the
+// worker every 30 minutes, so cohorts are not free to accumulate. Env-tunable
+// on the API pod. Delete or freeze old cohorts to make room.
+const MAX_COHORTS_PER_PROJECT_RAW = Number.parseInt(
+  process.env.MAX_COHORTS_PER_PROJECT ?? '250',
+  10,
+);
+const MAX_COHORTS_PER_PROJECT =
+  Number.isNaN(MAX_COHORTS_PER_PROJECT_RAW) || MAX_COHORTS_PER_PROJECT_RAW < 1
+    ? 250
+    : MAX_COHORTS_PER_PROJECT_RAW;
+
+async function assertCohortCapacity(projectId: string) {
+  const count = await db.cohort.count({ where: { projectId } });
+  if (count >= MAX_COHORTS_PER_PROJECT) {
+    throw TRPCBadRequestError(
+      `This project already has ${count} cohorts, the maximum is ${MAX_COHORTS_PER_PROJECT} (MAX_COHORTS_PER_PROJECT). Delete cohorts you no longer need to create new ones.`,
+    );
+  }
+}
+
 export const cohortRouter = createTRPCRouter({
   list: protectedProcedure
     .input(
@@ -94,6 +116,7 @@ export const cohortRouter = createTRPCRouter({
     .input(zCohortInput)
     .mutation(async ({ input }) => {
       await assertCohortNameAvailable(input.projectId, input.name);
+      await assertCohortCapacity(input.projectId);
       const cohort = await db.cohort.create({
         data: {
           name: input.name,
