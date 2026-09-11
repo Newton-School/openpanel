@@ -6,6 +6,7 @@ import type {
   IChartEventItem,
   IReportInput,
 } from '@openpanel/validation';
+import { isChartEventRunnable } from '@openpanel/validation';
 import { chQuery } from '../clickhouse/client';
 import { getAggregateChartSql } from '../services/chart.service';
 import { getChartPrevStartEndDate } from '../services/date.service';
@@ -110,6 +111,11 @@ export async function executeAggregateChart(
     }
 
     const event = definition as IChartEventItem & { type: 'event' };
+
+    if (!isChartEventRunnable(event)) {
+      // Property segment with no property yet: nothing to compute.
+      continue;
+    }
 
     // Build query input
     const queryInput = {
@@ -240,6 +246,10 @@ export async function executeAggregateChart(
       }
 
       const event = definition as IChartEventItem & { type: 'event' };
+
+      if (!isChartEventRunnable(event)) {
+        continue;
+      }
 
       const queryInput = {
         event: {
