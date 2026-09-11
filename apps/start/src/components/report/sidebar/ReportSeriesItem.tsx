@@ -1,4 +1,5 @@
 import { ColorSquare } from '@/components/color-square';
+import { useEffect, useState } from 'react';
 import { DropdownMenuComposed } from '@/components/ui/dropdown-menu';
 import { useDispatch } from '@/redux';
 import { shortId } from '@openpanel/common';
@@ -187,26 +188,20 @@ export function ReportSeriesItem({
             (chartEvent.segment === 'property_percentile' ||
               (chartEvent.segment === 'property_per_user' &&
                 chartEvent.propertyOuter === 'percentile')) && (
-              <DropdownMenuComposed
-                label="Percentile"
-                items={propertyPercentiles.map((p) => ({
-                  value: String(p),
-                  label: `P${p}`,
-                }))}
-                onChange={(value) =>
+              <PercentileInput
+                value={
+                  chartEvent.propertyPercentile ?? DEFAULT_PROPERTY_PERCENTILE
+                }
+                onChange={(percentile) =>
                   dispatch(
                     changeEvent({
                       ...chartEvent,
-                      propertyPercentile: Number(value),
+                      propertyPercentile: percentile,
                       type: 'event',
                     }),
                   )
                 }
-              >
-                <SmallButton icon={PercentIcon}>
-                  {`P${chartEvent.propertyPercentile ?? DEFAULT_PROPERTY_PERCENTILE}`}
-                </SmallButton>
-              </DropdownMenuComposed>
+              />
             )}
         </div>
       )}
@@ -214,6 +209,64 @@ export function ReportSeriesItem({
       {/* Filters - only for events */}
       {chartEvent && !isSelectManyEvents && <FiltersList event={chartEvent} />}
     </div>
+  );
+}
+
+// Any whole percentile 0-100, typed directly (P0 = minimum, P100 = maximum).
+// Product wants arbitrary cut-offs ("the top 37% of users"), so this is an
+// input with the common values as suggestions rather than a fixed list.
+// Committed on Enter or blur so typing "3" then "37" runs one query.
+function PercentileInput({
+  value,
+  onChange,
+}: {
+  value: number;
+  onChange: (percentile: number) => void;
+}) {
+  const [draft, setDraft] = useState(String(value));
+  useEffect(() => {
+    setDraft(String(value));
+  }, [value]);
+  const commit = () => {
+    const parsed = Math.round(Number(draft));
+    if (Number.isNaN(parsed) || parsed < 0 || parsed > 100) {
+      setDraft(String(value));
+      return;
+    }
+    if (parsed !== value) {
+      onChange(parsed);
+    }
+  };
+  return (
+    <label className="flex items-center gap-1 rounded-md border border-border bg-card p-1 px-2 text-sm font-medium leading-none">
+      <PercentIcon size={12} className="shrink-0" />
+      <span>P</span>
+      <input
+        type="number"
+        inputMode="numeric"
+        min={0}
+        max={100}
+        step={1}
+        list="percentile-presets"
+        aria-label="Percentile (0-100)"
+        title="Percentile, 0-100. P0 is the minimum, P100 the maximum."
+        className="w-10 bg-transparent outline-none [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            e.currentTarget.blur();
+          }
+        }}
+      />
+      <datalist id="percentile-presets">
+        {propertyPercentiles.map((p) => (
+          <option key={p} value={p} />
+        ))}
+      </datalist>
+    </label>
   );
 }
 

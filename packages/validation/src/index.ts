@@ -73,11 +73,11 @@ export const zChartEvent = z.object({
   propertyPercentile: z
     .number()
     .int()
-    .min(1)
-    .max(99)
+    .min(0)
+    .max(100)
     .optional()
     .describe(
-      'Percentile (1-99) for property_percentile, or for property_per_user when propertyOuter is percentile',
+      'Percentile (0-100; 0 = minimum, 100 = maximum) for property_percentile, or for property_per_user when propertyOuter is percentile',
     ),
   filters: z
     .array(zChartEventFilter)
