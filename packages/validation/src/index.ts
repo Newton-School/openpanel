@@ -41,6 +41,23 @@ export const zChartEventSegment = z
   .default('event')
   .describe('Defines how the event data should be segmented or aggregated');
 
+/**
+ * Segments that aggregate a property (sum/avg/min/max/median/percentile and
+ * per-user). Without a property they have nothing to compute; the query
+ * builders used to fall back to a plain event count, which drew a populated,
+ * misleading chart. Callers skip such series instead.
+ */
+export function segmentRequiresProperty(segment: string | undefined): boolean {
+  return segment?.startsWith('property_') ?? false;
+}
+
+export function isChartEventRunnable(event: {
+  segment?: string;
+  property?: string | null;
+}): boolean {
+  return !segmentRequiresProperty(event.segment) || !!event.property;
+}
+
 export const zChartEvent = z.object({
   id: z
     .string()

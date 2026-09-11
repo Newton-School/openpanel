@@ -1,4 +1,5 @@
 import { ColorSquare } from '@/components/color-square';
+import { cn } from '@/utils/cn';
 import { useEffect, useState } from 'react';
 import { DropdownMenuComposed } from '@/components/ui/dropdown-menu';
 import { useDispatch } from '@/redux';
@@ -141,10 +142,21 @@ export function ReportSeriesItem({
                 <SmallButton
                   icon={DatabaseIcon}
                   onClick={() => setOpen((p) => !p)}
+                  // Required: without a property this series returns no data.
+                  className={
+                    chartEvent.property
+                      ? undefined
+                      : 'border-destructive text-destructive'
+                  }
+                  title={
+                    chartEvent.property
+                      ? undefined
+                      : 'Pick the property to aggregate. The series shows no data until you do.'
+                  }
                 >
                   {chartEvent.property
                     ? `Property: ${chartEvent.property}`
-                    : 'Select property'}
+                    : 'Select property (required)'}
                 </SmallButton>
               )}
             </PropertiesCombobox>
@@ -273,6 +285,7 @@ function PercentileInput({
 function SmallButton({
   children,
   icon: Icon,
+  className,
   ...props
 }: {
   children: React.ReactNode;
@@ -281,7 +294,10 @@ function SmallButton({
   return (
     <button
       type="button"
-      className="flex items-center gap-1 rounded-md border border-border bg-card p-1 px-2 text-sm font-medium leading-none text-left min-w-0"
+      className={cn(
+        'flex items-center gap-1 rounded-md border border-border bg-card p-1 px-2 text-sm font-medium leading-none text-left min-w-0',
+        className,
+      )}
       {...props}
     >
       <Icon size={12} className="shrink-0" />

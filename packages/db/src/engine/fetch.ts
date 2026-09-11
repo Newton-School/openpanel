@@ -1,7 +1,10 @@
 import type { ISerieDataItem } from '@openpanel/common';
 import { groupByLabels } from '@openpanel/common';
 import { alphabetIds } from '@openpanel/constants';
-import type { IGetChartDataInput } from '@openpanel/validation';
+import {
+  type IGetChartDataInput,
+  isChartEventRunnable,
+} from '@openpanel/validation';
 import { chQuery } from '../clickhouse/client';
 import { getChartSql } from '../services/chart.service';
 import type { ConcreteSeries, Plan } from './types';
@@ -23,6 +26,11 @@ export async function fetch(plan: Plan): Promise<ConcreteSeries[]> {
     }
 
     const event = definition as typeof definition & { type: 'event' };
+
+    if (!isChartEventRunnable(event)) {
+      // Property segment with no property yet: nothing to compute.
+      continue;
+    }
 
     // Find the corresponding concrete series placeholder
     const placeholder = plan.concreteSeries.find(
