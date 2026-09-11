@@ -68,7 +68,7 @@ export function ReportSeriesItem({
 
       {/* Segment and Filter buttons - only for events */}
       {chartEvent && (showSegment || showAddFilter) && (
-        <div className="flex gap-2 p-2 pt-0">
+        <div className="flex flex-wrap gap-2 p-2 pt-0">
           {showSegment && (
             <ReportSegment
               value={chartEvent.segment}
