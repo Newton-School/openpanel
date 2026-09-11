@@ -24,6 +24,12 @@ interface MetricCardProps {
   serie: IChartData['series'][number];
   color?: string;
   metric: IChartMetric;
+  /**
+   * Whole-range aggregate for this series (chart.aggregate). When present
+   * its `sum` is the headline and its `previous.sum` drives the diff; the
+   * time-series `metric` is only the fallback while it loads.
+   */
+  headline?: IChartData['series'][number]['metrics'];
   unit?: string;
 }
 
@@ -52,6 +58,7 @@ export function MetricCard({
   serie,
   color: _color,
   metric,
+  headline,
   unit,
 }: MetricCardProps) {
   const { isEditMode } = useReportChartContext();
@@ -74,7 +81,10 @@ export function MetricCard({
     );
   };
 
-  const previous = serie.metrics.previous?.[metric];
+  const headlineValue = headline ? headline.sum : serie.metrics[metric];
+  const previous = headline
+    ? headline.previous?.sum
+    : serie.metrics.previous?.[metric];
 
   const graphColors = getDiffIndicator(
     false,
@@ -137,7 +147,7 @@ export function MetricCard({
       </div>
       <MetricCardNumber
         label={<SerieName name={serie.names} />}
-        value={renderValue(serie.metrics[metric], 'ml-1 font-light text-xl')}
+        value={renderValue(headlineValue, 'ml-1 font-light text-xl')}
         enhancer={
           <PreviousDiffIndicator
             {...previous}

@@ -7,6 +7,8 @@ import {
   lineTypes,
   metrics,
   operators,
+  propertyInnerAggregations,
+  propertyOuterAggregations,
   timeWindows,
 } from '@openpanel/constants';
 
@@ -56,6 +58,27 @@ export const zChartEvent = z.object({
       'Optional property of the event used for specific segment calculations (e.g., value for property_sum/average)',
     ),
   segment: zChartEventSegment,
+  propertyInner: z
+    .enum(objectToZodEnums(propertyInnerAggregations))
+    .optional()
+    .describe(
+      'property_per_user only: aggregation of the property per user within each bucket',
+    ),
+  propertyOuter: z
+    .enum(objectToZodEnums(propertyOuterAggregations))
+    .optional()
+    .describe(
+      'property_per_user only: aggregation across the per-user values',
+    ),
+  propertyPercentile: z
+    .number()
+    .int()
+    .min(1)
+    .max(99)
+    .optional()
+    .describe(
+      'Percentile (1-99) for property_percentile, or for property_per_user when propertyOuter is percentile',
+    ),
   filters: z
     .array(zChartEventFilter)
     .default([])

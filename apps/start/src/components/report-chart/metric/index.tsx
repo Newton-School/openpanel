@@ -26,6 +26,25 @@ export function ReportMetricChart() {
     ),
   );
 
+  // Newton fork: the headline number is the whole-range aggregate (same
+  // query pie/bar use), not the unique-user total of the time series. For
+  // averages, medians and per-user aggregations the per-bucket values cannot
+  // be combined client-side, so the aggregate query is the only correct
+  // source. The time series above still draws the sparkline.
+  const aggregate = useQuery(
+    trpc.chart.aggregate.queryOptions(
+      {
+        ...chartInput,
+        shareId,
+      },
+      {
+        placeholderData: keepPreviousData,
+        staleTime: 1000 * 60 * 1,
+        enabled: !isLazyLoading,
+      },
+    ),
+  );
+
   if (
     isLazyLoading ||
     res.isLoading ||
@@ -42,7 +61,7 @@ export function ReportMetricChart() {
     return <Empty />;
   }
 
-  return <Chart data={res.data} />;
+  return <Chart data={res.data} aggregate={aggregate.data} />;
 }
 
 export function Loading() {

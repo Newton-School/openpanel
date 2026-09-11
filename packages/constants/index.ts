@@ -122,7 +122,35 @@ export const chartSegments = {
   property_average: 'Average of property',
   property_max: 'Max of property',
   property_min: 'Min of property',
+  property_median: 'Median of property',
+  property_percentile: 'Percentile of property',
+  property_per_user: 'Aggregate property per user',
 };
+
+// Newton fork: two-layer property aggregation (Mixpanel's "Aggregate
+// Property per User"). Inner runs per user within each time bucket, outer
+// runs across those per-user values. Users with no matching event in a
+// bucket do not take part, same as Mixpanel.
+export const propertyInnerAggregations = {
+  sum: 'Sum',
+  average: 'Average',
+  distinct: 'Distinct count',
+  min: 'Minimum',
+  max: 'Maximum',
+} as const;
+
+export const propertyOuterAggregations = {
+  average: 'Average',
+  sum: 'Sum',
+  median: 'Median',
+  percentile: 'Percentile',
+  min: 'Minimum',
+  max: 'Maximum',
+} as const;
+
+// Fixed percentile picks, as in Mixpanel (p25/p75/p90/p99).
+export const propertyPercentiles = [25, 75, 90, 95, 99] as const;
+export const DEFAULT_PROPERTY_PERCENTILE = 90;
 
 export const lineTypes = {
   monotone: 'Monotone',
