@@ -44,9 +44,12 @@ export function ReportMetricChart() {
   // cannot be combined client-side, so those fetch the whole-range aggregate
   // (same query pie/bar use). The time series above always draws the
   // sparkline.
+  // Formulas need it too: the engine applies the formula to the whole-range
+  // input values there, which is the only sensible headline for e.g. A / B.
   const needsAggregate = chartInput.series.some(
     (serie) =>
-      serie.type === 'event' && !HEADLINE_FROM_SERIES.has(serie.segment),
+      serie.type === 'formula' ||
+      (serie.type === 'event' && !HEADLINE_FROM_SERIES.has(serie.segment)),
   );
   const aggregate = useQuery(
     trpc.chart.aggregate.queryOptions(

@@ -13,7 +13,10 @@ type AggregateData = RouterOutputs['chart']['aggregate'];
 function seriesMetricFor(segment: string | undefined): IChartMetric {
   switch (segment) {
     case 'user':
-      return 'count'; // uniqMerge total over the range
+    case 'formula':
+      // uniqMerge total over the range; for formulas the formula applied to
+      // the inputs' totals, shown only until the aggregate arrives.
+      return 'count';
     case 'property_min':
       return 'min';
     case 'property_max':
@@ -39,7 +42,7 @@ export function Chart({ data, aggregate }: Props) {
   const segmentById = new Map(
     chartInput.series.map((s) => [
       s.id,
-      s.type === 'event' ? s.segment : undefined,
+      s.type === 'event' ? s.segment : 'formula',
     ]),
   );
   // The two procedures build series ids differently, but the display names
