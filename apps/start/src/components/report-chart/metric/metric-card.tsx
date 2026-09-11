@@ -30,6 +30,12 @@ interface MetricCardProps {
    * time-series `metric` is only the fallback while it loads.
    */
   headline?: IChartData['series'][number]['metrics'];
+  /**
+   * Only for series that need the aggregate: 'loading' shows a skeleton,
+   * 'unavailable' shows N/A. Never fall back to the time-series metric for
+   * these, the sum of per-bucket averages is a plausible-looking wrong number.
+   */
+  headlineState?: 'ready' | 'loading' | 'unavailable';
   unit?: string;
 }
 
@@ -59,6 +65,7 @@ export function MetricCard({
   color: _color,
   metric,
   headline,
+  headlineState,
   unit,
 }: MetricCardProps) {
   const { isEditMode } = useReportChartContext();
@@ -81,10 +88,16 @@ export function MetricCard({
     );
   };
 
-  const headlineValue = headline ? headline.sum : serie.metrics[metric];
+  const headlineValue = headline
+    ? headline.sum
+    : headlineState
+      ? undefined
+      : serie.metrics[metric];
   const previous = headline
     ? headline.previous?.sum
-    : serie.metrics.previous?.[metric];
+    : headlineState
+      ? undefined
+      : serie.metrics.previous?.[metric];
 
   const graphColors = getDiffIndicator(
     false,
@@ -147,7 +160,13 @@ export function MetricCard({
       </div>
       <MetricCardNumber
         label={<SerieName name={serie.names} />}
-        value={renderValue(headlineValue, 'ml-1 font-light text-xl')}
+        value={
+          headlineState === 'loading' ? (
+            <div className="my-1 h-6 w-16 animate-pulse rounded bg-def-200" />
+          ) : (
+            renderValue(headlineValue, 'ml-1 font-light text-xl')
+          )
+        }
         enhancer={
           <PreviousDiffIndicator
             {...previous}

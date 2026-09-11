@@ -362,12 +362,15 @@ function singlePassPropertyAggregate(
 function perUserInnerAggregate(
   inner: NonNullable<IChartEvent['propertyInner']> | undefined,
   valueExpr: string,
+  rawExpr: string,
 ): string {
   switch (inner ?? 'sum') {
     case 'average':
       return `avg(${valueExpr})`;
     case 'distinct':
-      return `uniqExact(${valueExpr})`;
+      // Counts distinct raw values so categorical properties work (distinct
+      // pages per user); the float cast would null every non-numeric value.
+      return `uniqExact(${rawExpr})`;
     case 'min':
       return `min(${valueExpr})`;
     case 'max':
@@ -419,13 +422,14 @@ function applyPerUserAggregation(
     return;
   }
   const valueExpr = propertyValueExpr(event.property, projectId);
+  const rawExpr = getSelectPropertyKey(event.property, projectId);
   sb.where.property = propertyPresentWhere(event.property, projectId);
 
   const innerSelects = Object.entries(sb.select)
     .filter(([key]) => key !== 'count')
     .map(([, expr]) => expr);
   const innerGroupBy = helpers.join(sb.groupBy, ', ');
-  const innerSql = `SELECT ${[...innerSelects, 'profile_id', `${perUserInnerAggregate(event.propertyInner, valueExpr)} as _pu`].join(', ')} ${helpers.getFrom()} ${helpers.getJoins()} ${helpers.getWhere()} GROUP BY ${innerGroupBy ? `${innerGroupBy}, ` : ''}profile_id`;
+  const innerSql = `SELECT ${[...innerSelects, 'profile_id', `${perUserInnerAggregate(event.propertyInner, valueExpr, rawExpr)} as _pu`].join(', ')} ${helpers.getFrom()} ${helpers.getJoins()} ${helpers.getWhere()} GROUP BY ${innerGroupBy ? `${innerGroupBy}, ` : ''}profile_id`;
 
   // Outer: read the inner aliases. Keys the caller grouped by stay grouping
   // keys; anything else (the constant label_0, the aggregate builder's

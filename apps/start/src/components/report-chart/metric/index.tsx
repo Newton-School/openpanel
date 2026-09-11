@@ -1,21 +1,11 @@
 import { useTRPC } from '@/integrations/trpc/react';
-import type { IChartEventSegment } from '@openpanel/validation';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 
 import { AspectContainer } from '../aspect-container';
 import { ReportChartEmpty } from '../common/empty';
 import { ReportChartError } from '../common/error';
 import { useChartInput, useReportChartContext } from '../context';
-import { Chart } from './chart';
-
-// Segments whose whole-range value follows from the time series itself.
-const HEADLINE_FROM_SERIES = new Set<IChartEventSegment>([
-  'event',
-  'user',
-  'property_sum',
-  'property_min',
-  'property_max',
-]);
+import { type AggregateState, Chart, HEADLINE_FROM_SERIES } from './chart';
 
 export function ReportMetricChart() {
   const { isLazyLoading, shareId } = useReportChartContext();
@@ -81,7 +71,23 @@ export function ReportMetricChart() {
     return <Empty />;
   }
 
-  return <Chart data={res.data} aggregate={aggregate.data} />;
+  // With `enabled: false` TanStack Query still serves keepPreviousData, so a
+  // report switched from Average to Sum would keep showing the old average.
+  // Only hand the aggregate down while a segment actually needs it.
+  const aggregateState: AggregateState = !needsAggregate
+    ? 'idle'
+    : aggregate.isError
+      ? 'error'
+      : aggregate.data
+        ? 'ready'
+        : 'loading';
+  return (
+    <Chart
+      data={res.data}
+      aggregate={needsAggregate ? aggregate.data : undefined}
+      aggregateState={aggregateState}
+    />
+  );
 }
 
 export function Loading() {

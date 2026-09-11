@@ -8,6 +8,19 @@ import { MetricCard } from './metric-card';
 
 type AggregateData = RouterOutputs['chart']['aggregate'];
 
+// Segments whose whole-range value follows from the time series itself
+// (sum of buckets, or the exact uniqMerge total_count). Every other segment,
+// and formulas, need the whole-range aggregate query for the headline.
+export const HEADLINE_FROM_SERIES = new Set<string>([
+  'event',
+  'user',
+  'property_sum',
+  'property_min',
+  'property_max',
+]);
+
+export type AggregateState = 'idle' | 'loading' | 'ready' | 'error';
+
 // Whole-range value derivable from the time series, used when no aggregate
 // query was issued for the segment (see ReportMetricChart).
 function seriesMetricFor(segment: string | undefined): IChartMetric {
@@ -29,9 +42,10 @@ function seriesMetricFor(segment: string | undefined): IChartMetric {
 interface Props {
   data: IChartData;
   aggregate?: AggregateData;
+  aggregateState: AggregateState;
 }
 
-export function Chart({ data, aggregate }: Props) {
+export function Chart({ data, aggregate, aggregateState }: Props) {
   const {
     isEditMode,
     report: { unit },
@@ -61,12 +75,32 @@ export function Chart({ data, aggregate }: Props) {
       )}
     >
       {series.map((serie) => {
+        const segment = segmentById.get(serie.event.id);
+        if (segment && HEADLINE_FROM_SERIES.has(segment)) {
+          return (
+            <MetricCard
+              key={serie.id}
+              serie={serie}
+              metric={seriesMetricFor(segment)}
+              unit={unit}
+            />
+          );
+        }
+        const headline = aggregateByName.get(seriesKey(serie.names))?.metrics;
+        // No match once the aggregate is in: the series was cut by the
+        // aggregate's own ranking limit. Show N/A rather than a wrong number.
+        const headlineState = headline
+          ? 'ready'
+          : aggregateState === 'loading' || aggregateState === 'idle'
+            ? 'loading'
+            : 'unavailable';
         return (
           <MetricCard
             key={serie.id}
             serie={serie}
-            metric={seriesMetricFor(segmentById.get(serie.event.id))}
-            headline={aggregateByName.get(seriesKey(serie.names))?.metrics}
+            metric={seriesMetricFor(segment)}
+            headline={headline}
+            headlineState={headlineState}
             unit={unit}
           />
         );
