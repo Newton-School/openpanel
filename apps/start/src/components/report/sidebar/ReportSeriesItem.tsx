@@ -1,9 +1,23 @@
 import { ColorSquare } from '@/components/color-square';
+import { DropdownMenuComposed } from '@/components/ui/dropdown-menu';
 import { useDispatch } from '@/redux';
 import { shortId } from '@openpanel/common';
-import { alphabetIds } from '@openpanel/constants';
-import type { IChartEvent, IChartEventItem } from '@openpanel/validation';
-import { DatabaseIcon, FilterIcon, type LucideIcon } from 'lucide-react';
+import {
+  alphabetIds,
+  DEFAULT_PROPERTY_PERCENTILE,
+  propertyInnerAggregations,
+  propertyOuterAggregations,
+  propertyPercentiles,
+} from '@openpanel/constants';
+import { type IChartEvent, type IChartEventItem, mapKeys } from '@openpanel/validation';
+import {
+  DatabaseIcon,
+  FilterIcon,
+  type LucideIcon,
+  PercentIcon,
+  SigmaIcon,
+  UsersIcon,
+} from 'lucide-react';
 import { ReportSegment } from '../ReportSegment';
 import { changeEvent } from '../reportSlice';
 import { PropertiesCombobox } from './PropertiesCombobox';
@@ -54,7 +68,7 @@ export function ReportSeriesItem({
 
       {/* Segment and Filter buttons - only for events */}
       {chartEvent && (showSegment || showAddFilter) && (
-        <div className="flex gap-2 p-2 pt-0">
+        <div className="flex flex-wrap gap-2 p-2 pt-0">
           {showSegment && (
             <ReportSegment
               value={chartEvent.segment}
@@ -134,6 +148,66 @@ export function ReportSeriesItem({
               )}
             </PropertiesCombobox>
           )}
+
+          {/* Two-layer aggregation: per-user (inner) then across users (outer). */}
+          {showSegment && chartEvent.segment === 'property_per_user' && (
+            <>
+              <DropdownMenuComposed
+                label="Per user"
+                items={mapKeys(propertyInnerAggregations).map((key) => ({
+                  value: key,
+                  label: propertyInnerAggregations[key],
+                }))}
+                onChange={(propertyInner) =>
+                  dispatch(changeEvent({ ...chartEvent, propertyInner, type: 'event' }))
+                }
+              >
+                <SmallButton icon={UsersIcon}>
+                  {`Per user: ${propertyInnerAggregations[chartEvent.propertyInner ?? 'sum']}`}
+                </SmallButton>
+              </DropdownMenuComposed>
+              <DropdownMenuComposed
+                label="Across users"
+                items={mapKeys(propertyOuterAggregations).map((key) => ({
+                  value: key,
+                  label: propertyOuterAggregations[key],
+                }))}
+                onChange={(propertyOuter) =>
+                  dispatch(changeEvent({ ...chartEvent, propertyOuter, type: 'event' }))
+                }
+              >
+                <SmallButton icon={SigmaIcon}>
+                  {`Then: ${propertyOuterAggregations[chartEvent.propertyOuter ?? 'average']}`}
+                </SmallButton>
+              </DropdownMenuComposed>
+            </>
+          )}
+
+          {showSegment &&
+            (chartEvent.segment === 'property_percentile' ||
+              (chartEvent.segment === 'property_per_user' &&
+                chartEvent.propertyOuter === 'percentile')) && (
+              <DropdownMenuComposed
+                label="Percentile"
+                items={propertyPercentiles.map((p) => ({
+                  value: String(p),
+                  label: `P${p}`,
+                }))}
+                onChange={(value) =>
+                  dispatch(
+                    changeEvent({
+                      ...chartEvent,
+                      propertyPercentile: Number(value),
+                      type: 'event',
+                    }),
+                  )
+                }
+              >
+                <SmallButton icon={PercentIcon}>
+                  {`P${chartEvent.propertyPercentile ?? DEFAULT_PROPERTY_PERCENTILE}`}
+                </SmallButton>
+              </DropdownMenuComposed>
+            )}
         </div>
       )}
 

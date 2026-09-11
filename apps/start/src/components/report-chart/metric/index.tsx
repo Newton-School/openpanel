@@ -5,7 +5,7 @@ import { AspectContainer } from '../aspect-container';
 import { ReportChartEmpty } from '../common/empty';
 import { ReportChartError } from '../common/error';
 import { useChartInput, useReportChartContext } from '../context';
-import { Chart } from './chart';
+import { type AggregateState, Chart, HEADLINE_FROM_SERIES } from './chart';
 
 export function ReportMetricChart() {
   const { isLazyLoading, shareId } = useReportChartContext();
@@ -26,6 +26,35 @@ export function ReportMetricChart() {
     ),
   );
 
+  // Newton fork: the headline number is the whole-range value of the
+  // segment, not the unique-user total the card used to show. For counts,
+  // sums, min/max and unique users the time series already carries it (sum
+  // of buckets, or the exact uniqMerge total_count), so no extra query. For
+  // averages, medians, percentiles and per-user aggregations the buckets
+  // cannot be combined client-side, so those fetch the whole-range aggregate
+  // (same query pie/bar use). The time series above always draws the
+  // sparkline.
+  // Formulas need it too: the engine applies the formula to the whole-range
+  // input values there, which is the only sensible headline for e.g. A / B.
+  const needsAggregate = chartInput.series.some(
+    (serie) =>
+      serie.type === 'formula' ||
+      (serie.type === 'event' && !HEADLINE_FROM_SERIES.has(serie.segment)),
+  );
+  const aggregate = useQuery(
+    trpc.chart.aggregate.queryOptions(
+      {
+        ...chartInput,
+        shareId,
+      },
+      {
+        placeholderData: keepPreviousData,
+        staleTime: 1000 * 60 * 1,
+        enabled: !isLazyLoading && needsAggregate,
+      },
+    ),
+  );
+
   if (
     isLazyLoading ||
     res.isLoading ||
@@ -42,7 +71,23 @@ export function ReportMetricChart() {
     return <Empty />;
   }
 
-  return <Chart data={res.data} />;
+  // With `enabled: false` TanStack Query still serves keepPreviousData, so a
+  // report switched from Average to Sum would keep showing the old average.
+  // Only hand the aggregate down while a segment actually needs it.
+  const aggregateState: AggregateState = !needsAggregate
+    ? 'idle'
+    : aggregate.isError
+      ? 'error'
+      : aggregate.data
+        ? 'ready'
+        : 'loading';
+  return (
+    <Chart
+      data={res.data}
+      aggregate={needsAggregate ? aggregate.data : undefined}
+      aggregateState={aggregateState}
+    />
+  );
 }
 
 export function Loading() {

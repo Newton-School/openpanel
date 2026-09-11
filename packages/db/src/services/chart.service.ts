@@ -3,6 +3,7 @@ import { stripLeadingAndTrailingSlashes } from '@openpanel/common';
 import type {
   CohortDefinition,
   IChartBreakdown,
+  IChartEvent,
   IChartEventFilter,
   IGetChartDataInput,
   IReportInput,
@@ -314,6 +315,139 @@ export function rewriteProfilePropertyRefs(sql: string, keys: string[]): string 
   return out;
 }
 
+// Newton fork: property aggregations beyond sum/avg/min/max, and the
+// two-layer "aggregate property per user" (Mixpanel's Aggregate Property per
+// User). Semantics verified against Mixpanel on identical events: per time
+// bucket, aggregate the property per user (inner), then aggregate those
+// per-user values (outer); users with no matching event in the bucket take no
+// part. A whole-range view (aggregate builder) does the same over the range.
+
+const DEFAULT_PERCENTILE = 90;
+
+function propertyValueExpr(property: string, projectId?: string): string {
+  const key = getSelectPropertyKey(property, projectId);
+  return isNumericColumn(property) ? key : `toFloat64OrNull(${key})`;
+}
+
+function propertyPresentWhere(property: string, projectId?: string): string {
+  const key = getSelectPropertyKey(property, projectId);
+  return isNumericColumn(property)
+    ? `${key} IS NOT NULL`
+    : `${key} IS NOT NULL AND notEmpty(${key})`;
+}
+
+/** SQL aggregate for a single-pass property segment, or null if not one. */
+function singlePassPropertyAggregate(
+  event: Pick<IChartEvent, 'segment' | 'propertyPercentile'>,
+  valueExpr: string,
+): string | null {
+  switch (event.segment) {
+    case 'property_sum':
+      return `sum(${valueExpr})`;
+    case 'property_average':
+      return `avg(${valueExpr})`;
+    case 'property_max':
+      return `max(${valueExpr})`;
+    case 'property_min':
+      return `min(${valueExpr})`;
+    case 'property_median':
+      return `quantile(0.5)(${valueExpr})`;
+    case 'property_percentile':
+      return `quantile(${(event.propertyPercentile ?? DEFAULT_PERCENTILE) / 100})(${valueExpr})`;
+    default:
+      return null;
+  }
+}
+
+function perUserInnerAggregate(
+  inner: NonNullable<IChartEvent['propertyInner']> | undefined,
+  valueExpr: string,
+  rawExpr: string,
+): string {
+  switch (inner ?? 'sum') {
+    case 'average':
+      return `avg(${valueExpr})`;
+    case 'distinct':
+      // Counts distinct raw values so categorical properties work (distinct
+      // pages per user); the float cast would null every non-numeric value.
+      return `uniqExact(${rawExpr})`;
+    case 'min':
+      return `min(${valueExpr})`;
+    case 'max':
+      return `max(${valueExpr})`;
+    default:
+      return `sum(${valueExpr})`;
+  }
+}
+
+function perUserOuterAggregate(
+  outer: NonNullable<IChartEvent['propertyOuter']> | undefined,
+  percentile: number | undefined,
+  valueExpr: string,
+): string {
+  switch (outer ?? 'average') {
+    case 'sum':
+      return `sum(${valueExpr})`;
+    case 'median':
+      return `quantile(0.5)(${valueExpr})`;
+    case 'percentile':
+      return `quantile(${(percentile ?? DEFAULT_PERCENTILE) / 100})(${valueExpr})`;
+    case 'min':
+      return `min(${valueExpr})`;
+    case 'max':
+      return `max(${valueExpr})`;
+    default:
+      return `avg(${valueExpr})`;
+  }
+}
+
+/**
+ * Rewrites a builder that is set up for a flat aggregation into the two-layer
+ * form: the current FROM/JOIN/WHERE/GROUP BY become an inner query that adds
+ * profile_id to the grouping and emits the per-user value as `_pu`; the
+ * outer query reads the inner aliases and applies the cross-user aggregate.
+ * `sb.select` must hold only aliased expressions (`expr as alias`) plus the
+ * `count` slot, which is replaced.
+ */
+function applyPerUserAggregation(
+  sb: ReturnType<typeof createSqlBuilder>['sb'],
+  helpers: Pick<
+    ReturnType<typeof createSqlBuilder>,
+    'getFrom' | 'getJoins' | 'getWhere' | 'join'
+  >,
+  event: IChartEvent,
+  projectId?: string,
+) {
+  if (!event.property) {
+    return;
+  }
+  const valueExpr = propertyValueExpr(event.property, projectId);
+  const rawExpr = getSelectPropertyKey(event.property, projectId);
+  sb.where.property = propertyPresentWhere(event.property, projectId);
+
+  const innerSelects = Object.entries(sb.select)
+    .filter(([key]) => key !== 'count')
+    .map(([, expr]) => expr);
+  const innerGroupBy = helpers.join(sb.groupBy, ', ');
+  const innerSql = `SELECT ${[...innerSelects, 'profile_id', `${perUserInnerAggregate(event.propertyInner, valueExpr, rawExpr)} as _pu`].join(', ')} ${helpers.getFrom()} ${helpers.getJoins()} ${helpers.getWhere()} GROUP BY ${innerGroupBy ? `${innerGroupBy}, ` : ''}profile_id`;
+
+  // Outer: read the inner aliases. Keys the caller grouped by stay grouping
+  // keys; anything else (the constant label_0, the aggregate builder's
+  // constant date) is carried through with any() so it needs no GROUP BY.
+  const outerSelect: Record<string, string> = {};
+  for (const key of Object.keys(sb.select)) {
+    if (key === 'count') {
+      continue;
+    }
+    outerSelect[key] = key in sb.groupBy ? key : `any(${key}) as ${key}`;
+  }
+  outerSelect.count = `${perUserOuterAggregate(event.propertyOuter, event.propertyPercentile, '_pu')} as count`;
+  sb.select = outerSelect;
+  sb.from = `(${innerSql}) as per_user`;
+  sb.joins = {};
+  sb.where = {};
+}
+
 export async function getChartSql({
   event,
   breakdowns,
@@ -577,23 +711,21 @@ export async function getChartSql({
       'COUNT(*)::float / COUNT(DISTINCT profile_id)::float as count';
   }
 
-  const mathFunction = {
-    property_sum: 'sum',
-    property_average: 'avg',
-    property_max: 'max',
-    property_min: 'min',
-  }[event.segment as string];
-
-  if (mathFunction && event.property) {
-    const propertyKey = getSelectPropertyKey(event.property);
-
-    if (isNumericColumn(event.property)) {
-      sb.select.count = `${mathFunction}(${propertyKey}) as count`;
-      sb.where.property = `${propertyKey} IS NOT NULL`;
-    } else {
-      sb.select.count = `${mathFunction}(toFloat64OrNull(${propertyKey})) as count`;
-      sb.where.property = `${propertyKey} IS NOT NULL AND notEmpty(${propertyKey})`;
+  if (event.property) {
+    const singlePass = singlePassPropertyAggregate(
+      event,
+      propertyValueExpr(event.property),
+    );
+    if (singlePass) {
+      sb.select.count = `${singlePass} as count`;
+      sb.where.property = propertyPresentWhere(event.property);
     }
+  }
+
+  if (event.segment === 'property_per_user') {
+    // Must run after every select/where/groupBy entry is in place: it turns
+    // the current builder state into the inner per-user query.
+    applyPerUserAggregation(sb, { getFrom, getJoins, getWhere, join }, event);
   }
 
   if (event.segment === 'one_event_per_user') {
@@ -651,7 +783,8 @@ export async function getAggregateChartSql({
 }: Omit<IGetChartDataInput, 'interval' | 'chartType'> & {
   timezone: string;
 }) {
-  const { sb, join, getJoins, with: addCte, getSql } = createSqlBuilder();
+  const { sb, join, getJoins, getFrom, getWhere, with: addCte, getSql } =
+    createSqlBuilder();
 
   const hasAllCohortsBreakdown = breakdowns.some((b) =>
     isAllCohortsBreakdown(b.name),
@@ -865,23 +998,24 @@ export async function getAggregateChartSql({
       'COUNT(*)::float / COUNT(DISTINCT profile_id)::float as count';
   }
 
-  const mathFunction = {
-    property_sum: 'sum',
-    property_average: 'avg',
-    property_max: 'max',
-    property_min: 'min',
-  }[event.segment as string];
-
-  if (mathFunction && event.property) {
-    const propertyKey = getSelectPropertyKey(event.property, projectId);
-
-    if (isNumericColumn(event.property)) {
-      sb.select.count = `${mathFunction}(${propertyKey}) as count`;
-      sb.where.property = `${propertyKey} IS NOT NULL`;
-    } else {
-      sb.select.count = `${mathFunction}(toFloat64OrNull(${propertyKey})) as count`;
-      sb.where.property = `${propertyKey} IS NOT NULL AND notEmpty(${propertyKey})`;
+  if (event.property) {
+    const singlePass = singlePassPropertyAggregate(
+      event,
+      propertyValueExpr(event.property, projectId),
+    );
+    if (singlePass) {
+      sb.select.count = `${singlePass} as count`;
+      sb.where.property = propertyPresentWhere(event.property, projectId);
     }
+  }
+
+  if (event.segment === 'property_per_user') {
+    applyPerUserAggregation(
+      sb,
+      { getFrom, getJoins, getWhere, join },
+      event,
+      projectId,
+    );
   }
 
   if (event.segment === 'one_event_per_user') {
