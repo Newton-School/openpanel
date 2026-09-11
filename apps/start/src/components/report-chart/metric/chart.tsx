@@ -1,11 +1,27 @@
 import { useVisibleSeries } from '@/hooks/use-visible-series';
 import type { IChartData, RouterOutputs } from '@/trpc/client';
 import { cn } from '@/utils/cn';
+import type { IChartMetric } from '@openpanel/validation';
 
-import { useReportChartContext } from '../context';
+import { useChartInput, useReportChartContext } from '../context';
 import { MetricCard } from './metric-card';
 
 type AggregateData = RouterOutputs['chart']['aggregate'];
+
+// Whole-range value derivable from the time series, used when no aggregate
+// query was issued for the segment (see ReportMetricChart).
+function seriesMetricFor(segment: string | undefined): IChartMetric {
+  switch (segment) {
+    case 'user':
+      return 'count'; // uniqMerge total over the range
+    case 'property_min':
+      return 'min';
+    case 'property_max':
+      return 'max';
+    default:
+      return 'sum';
+  }
+}
 
 interface Props {
   data: IChartData;
@@ -18,6 +34,14 @@ export function Chart({ data, aggregate }: Props) {
     report: { unit },
   } = useReportChartContext();
   const { series } = useVisibleSeries(data, { limit: isEditMode ? 20 : 4 });
+  // serie.event.id is the report series id, so look the segment up there.
+  const chartInput = useChartInput();
+  const segmentById = new Map(
+    chartInput.series.map((s) => [
+      s.id,
+      s.type === 'event' ? s.segment : undefined,
+    ]),
+  );
   // The two procedures build series ids differently, but the display names
   // (event name + breakdown values) are identical, so match on those.
   const seriesKey = (names: string[]) => names.join('\u0000');
@@ -38,7 +62,7 @@ export function Chart({ data, aggregate }: Props) {
           <MetricCard
             key={serie.id}
             serie={serie}
-            metric={'count'}
+            metric={seriesMetricFor(segmentById.get(serie.event.id))}
             headline={aggregateByName.get(seriesKey(serie.names))?.metrics}
             unit={unit}
           />

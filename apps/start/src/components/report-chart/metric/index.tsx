@@ -1,4 +1,5 @@
 import { useTRPC } from '@/integrations/trpc/react';
+import type { IChartEventSegment } from '@openpanel/validation';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 
 import { AspectContainer } from '../aspect-container';
@@ -6,6 +7,15 @@ import { ReportChartEmpty } from '../common/empty';
 import { ReportChartError } from '../common/error';
 import { useChartInput, useReportChartContext } from '../context';
 import { Chart } from './chart';
+
+// Segments whose whole-range value follows from the time series itself.
+const HEADLINE_FROM_SERIES = new Set<IChartEventSegment>([
+  'event',
+  'user',
+  'property_sum',
+  'property_min',
+  'property_max',
+]);
 
 export function ReportMetricChart() {
   const { isLazyLoading, shareId } = useReportChartContext();
@@ -26,11 +36,18 @@ export function ReportMetricChart() {
     ),
   );
 
-  // Newton fork: the headline number is the whole-range aggregate (same
-  // query pie/bar use), not the unique-user total of the time series. For
-  // averages, medians and per-user aggregations the per-bucket values cannot
-  // be combined client-side, so the aggregate query is the only correct
-  // source. The time series above still draws the sparkline.
+  // Newton fork: the headline number is the whole-range value of the
+  // segment, not the unique-user total the card used to show. For counts,
+  // sums, min/max and unique users the time series already carries it (sum
+  // of buckets, or the exact uniqMerge total_count), so no extra query. For
+  // averages, medians, percentiles and per-user aggregations the buckets
+  // cannot be combined client-side, so those fetch the whole-range aggregate
+  // (same query pie/bar use). The time series above always draws the
+  // sparkline.
+  const needsAggregate = chartInput.series.some(
+    (serie) =>
+      serie.type === 'event' && !HEADLINE_FROM_SERIES.has(serie.segment),
+  );
   const aggregate = useQuery(
     trpc.chart.aggregate.queryOptions(
       {
@@ -40,7 +57,7 @@ export function ReportMetricChart() {
       {
         placeholderData: keepPreviousData,
         staleTime: 1000 * 60 * 1,
-        enabled: !isLazyLoading,
+        enabled: !isLazyLoading && needsAggregate,
       },
     ),
   );
