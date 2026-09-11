@@ -149,7 +149,8 @@ export const propertyOuterAggregations = {
 } as const;
 
 // Fixed percentile picks, as in Mixpanel (p25/p75/p90/p99).
-export const propertyPercentiles = [25, 75, 90, 95, 99] as const;
+// Suggested values for the percentile input; any whole number 0-100 is valid.
+export const propertyPercentiles = [25, 50, 75, 90, 95, 99] as const;
 export const DEFAULT_PROPERTY_PERCENTILE = 90;
 
 export const lineTypes = {
