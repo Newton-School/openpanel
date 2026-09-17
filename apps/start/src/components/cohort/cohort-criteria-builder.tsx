@@ -5,6 +5,7 @@ import { useAppParams } from '@/hooks/use-app-params';
 import { useEventNames } from '@/hooks/use-event-names';
 import { timeWindows } from '@openpanel/constants';
 import type {
+  ChartCohortDefinition,
   CohortDefinition,
   EventBasedCohortDefinition,
   EventCriteria,
@@ -49,6 +50,9 @@ export function CohortCriteriaBuilder({
   // the report and create a new cohort instead.
   if (definition.type === 'funnel') {
     return <FunnelCohortSummary definition={definition} />;
+  }
+  if (definition.type === 'chart') {
+    return <ChartCohortSummary definition={definition} />;
   }
 
   return (
@@ -127,6 +131,49 @@ function FunnelCohortSummary({
         Created from a funnel report. Membership is recomputed against the
         live funnel on every refresh; freeze the snapshot to keep it fixed.
         To change the steps, adjust the report and create a new cohort.
+      </div>
+    </div>
+  );
+}
+
+export function describeChartCohort(definition: ChartCohortDefinition) {
+  const { criteria } = definition;
+  const event = criteria.serie.displayName || criteria.serie.name;
+  const when = criteria.date
+    ? `on ${criteria.date.slice(0, 10)}`
+    : criteria.startDate && criteria.endDate
+      ? `between ${criteria.startDate.slice(0, 10)} and ${criteria.endDate.slice(0, 10)}`
+      : `in ${timeWindows[criteria.range as keyof typeof timeWindows]?.label ?? criteria.range}`;
+  const breakdown = Object.entries(criteria.breakdowns ?? {})
+    .map(([key, value]) => `${key} = ${value}`)
+    .join(', ');
+  const filters = (criteria.serie.filters ?? []).length;
+  return { event, when, breakdown, filters };
+}
+
+function ChartCohortSummary({
+  definition,
+}: {
+  definition: ChartCohortDefinition;
+}) {
+  const d = describeChartCohort(definition);
+  return (
+    <div className="rounded-lg border bg-def-100 p-4 text-sm flex flex-col gap-1">
+      <div className="font-medium">
+        Users who did "{d.event}" {d.when}
+      </div>
+      {d.breakdown && (
+        <div className="text-muted-foreground">Breakdown: {d.breakdown}</div>
+      )}
+      {d.filters > 0 && (
+        <div className="text-muted-foreground">
+          With the report's {d.filters} filter{d.filters === 1 ? '' : 's'}
+        </div>
+      )}
+      <div className="text-muted-foreground mt-2">
+        Created from a chart's View Users. Membership is recomputed against
+        the live data on every refresh; freeze the snapshot to keep it fixed.
+        To change the criteria, adjust the report and create a new cohort.
       </div>
     </div>
   );

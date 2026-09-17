@@ -1,11 +1,13 @@
 import sqlstring from 'sqlstring';
 import type {
+  ChartCohortDefinition,
   CohortDefinition,
   EventBasedCohortDefinition,
   EventCriteria,
   Frequency,
   FunnelCohortDefinition,
   IChartEventFilter,
+  IInterval,
   IReportInput,
   PropertyBasedCohortDefinition,
   Timeframe,
@@ -22,6 +24,7 @@ import {
 } from './profile-resolution';
 import { getChartStartEndDate } from './date.service';
 import { funnelService } from './funnel.service';
+import { getChartProfileIds, type ChartProfilesScope } from './chart-profiles.service';
 import { getSettingsForProject } from './organization.service';
 import { getProfiles, type IServiceProfile } from './profile.service';
 
@@ -605,6 +608,42 @@ export async function computeFunnelCohort(
   });
 }
 
+export async function computeChartCohort(
+  projectId: string,
+  definition: ChartCohortDefinition,
+  limit?: number,
+): Promise<string[]> {
+  const { criteria } = definition;
+  let scope: ChartProfilesScope;
+  if (criteria.date) {
+    scope = {
+      type: 'bucket',
+      date: new Date(criteria.date),
+      interval: criteria.interval as IInterval,
+    };
+  } else {
+    const { timezone } = await getSettingsForProject(projectId);
+    const dates = getChartStartEndDate(
+      {
+        startDate: criteria.startDate ?? null,
+        endDate: criteria.endDate ?? null,
+        range: criteria.range as IReportInput['range'],
+      },
+      timezone,
+    );
+    scope = { type: 'range', ...dates };
+  }
+  // Same query the View Users modal ran, so the cohort holds exactly the
+  // users that were listed.
+  const ids = await getChartProfileIds({
+    projectId,
+    serie: { name: criteria.serie.name, filters: criteria.serie.filters ?? [] },
+    breakdowns: criteria.breakdowns,
+    scope,
+  });
+  return limit ? ids.slice(0, limit) : ids;
+}
+
 export async function computeCohort(
   projectId: string,
   definition: CohortDefinition,
@@ -618,6 +657,9 @@ export async function computeCohort(
   }
   if (definition.type === 'funnel') {
     return computeFunnelCohort(projectId, definition, limit);
+  }
+  if (definition.type === 'chart') {
+    return computeChartCohort(projectId, definition, limit);
   }
   return [];
 }
@@ -635,6 +677,14 @@ export async function countCohort(
   if (definition.type === 'funnel') {
     // Same cap as materialization; the funnel query has no count variant.
     const ids = await computeFunnelCohort(
+      projectId,
+      definition,
+      COHORT_MATERIALIZE_LIMIT,
+    );
+    return ids.length;
+  }
+  if (definition.type === 'chart') {
+    const ids = await computeChartCohort(
       projectId,
       definition,
       COHORT_MATERIALIZE_LIMIT,
