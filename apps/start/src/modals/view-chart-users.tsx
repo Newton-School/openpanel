@@ -200,18 +200,35 @@ function ProfileList({ profiles }: { profiles: any[] }) {
 interface ChartUsersViewProps {
   chartData: IChartData;
   report: IReportInput;
-  date: string;
+  /** One x-axis bucket (line/area/histogram point). Omit for whole range. */
+  date?: string;
+  /** Bar, pie, metric: the report's whole date range instead of a bucket. */
+  wholeRange?: boolean;
+  /** Preselect the clicked report series / breakdown series. */
+  serieId?: string;
+  breakdownSerieId?: string;
 }
 
-function ChartUsersView({ chartData, report, date }: ChartUsersViewProps) {
+function ChartUsersView({
+  chartData,
+  report,
+  date,
+  wholeRange = false,
+  serieId,
+  breakdownSerieId,
+}: ChartUsersViewProps) {
   const trpc = useTRPC();
   const queryClient = useQueryClient();
   const [selectedSerieId, setSelectedSerieId] = useState<string | null>(
-    report.series[0]?.id || null,
+    serieId ?? report.series[0]?.id ?? null,
   );
   const [selectedBreakdownId, setSelectedBreakdownId] = useState<string | null>(
-    null,
+    breakdownSerieId ?? null,
   );
+  const rangeLabel =
+    report.startDate && report.endDate
+      ? `${report.startDate.slice(0, 10)} to ${report.endDate.slice(0, 10)}`
+      : (timeWindows[report.range]?.label ?? report.range);
 
   const selectedReportSerie = useMemo(
     () => report.series.find((s) => s.id === selectedSerieId),
@@ -237,7 +254,14 @@ function ChartUsersView({ chartData, report, date }: ChartUsersViewProps) {
 
   const profilesQueryInput = {
     projectId: report.projectId,
-    date: date,
+    ...(wholeRange
+      ? {
+          wholeRange: true,
+          range: report.range,
+          startDate: report.startDate,
+          endDate: report.endDate,
+        }
+      : { date }),
     series:
       selectedReportSerie && selectedReportSerie.type === 'event'
         ? [selectedReportSerie]
@@ -259,7 +283,9 @@ function ChartUsersView({ chartData, report, date }: ChartUsersViewProps) {
       selectedReportSerie?.type === 'event'
         ? selectedReportSerie.displayName || selectedReportSerie.name
         : 'serie';
-    const day = new Date(date).toISOString().slice(0, 10);
+    const day = wholeRange
+      ? slugify(rangeLabel)
+      : new Date(date ?? Date.now()).toISOString().slice(0, 10);
     // Export path: server applies VIEW_USERS_EXPORT_LIMIT and attaches
     // last_seen; the on-screen list skips both.
     // One attempt per click: an export can run for minutes, and a retried
@@ -288,7 +314,11 @@ function ChartUsersView({ chartData, report, date }: ChartUsersViewProps) {
         <div>
           <ModalHeader
             title="View Users"
-            text={`Users who performed actions on ${new Date(date).toLocaleDateString()}`}
+            text={
+              wholeRange
+                ? `Users who performed actions in ${rangeLabel}`
+                : `Users who performed actions on ${new Date(date ?? Date.now()).toLocaleDateString()}`
+            }
           />
           {report.series.length > 0 && (
             <div className="col md:row gap-2">
@@ -332,7 +362,11 @@ function ChartUsersView({ chartData, report, date }: ChartUsersViewProps) {
                             ', ',
                           )}
                           <DropdownMenuShortcut className="ml-auto">
-                            ({serie.data.find((d) => d.date === date)?.count})
+                            (
+                            {wholeRange
+                              ? serie.metrics.sum
+                              : serie.data.find((d) => d.date === date)?.count}
+                            )
                           </DropdownMenuShortcut>
                         </SelectItem>
                       ))}
@@ -561,7 +595,10 @@ type ViewChartUsersProps =
       type: 'chart';
       chartData: IChartData;
       report: IReportInput;
-      date: string;
+      date?: string;
+      wholeRange?: boolean;
+      serieId?: string;
+      breakdownSerieId?: string;
     }
   | {
       type: 'funnel';
@@ -583,6 +620,9 @@ export default function ViewChartUsers(props: ViewChartUsersProps) {
       chartData={props.chartData}
       report={props.report}
       date={props.date}
+      wholeRange={props.wholeRange}
+      serieId={props.serieId}
+      breakdownSerieId={props.breakdownSerieId}
     />
   );
 }

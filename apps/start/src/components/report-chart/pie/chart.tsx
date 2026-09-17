@@ -7,6 +7,7 @@ import { round } from '@/utils/math';
 import { getChartColor } from '@/utils/theme';
 import { truncate } from '@/utils/truncate';
 import { Fragment } from 'react';
+import { pushModal } from '@/modals';
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from 'recharts';
 
 import {
@@ -68,6 +69,7 @@ const PieTooltip = (props: { payload?: any[] }) => {
 export function Chart({ data }: Props) {
   const {
     isEditMode,
+    report,
     report: { visibleSeries: savedVisibleSeries },
   } = useReportChartContext();
   const dispatch = useDispatch();
@@ -81,6 +83,7 @@ export function Chart({ data }: Props) {
   const sum = series.reduce((acc, serie) => acc + serie.metrics.sum, 0);
   const pieData = series.map((serie) => ({
     id: serie.id,
+    eventId: serie.event.id,
     color: getChartColor(serie.index),
     index: serie.index,
     name: serie.names.join(' > '),
@@ -105,13 +108,31 @@ export function Chart({ data }: Props) {
               outerRadius={'80%'}
               isAnimationActive={false}
               label={renderLabel}
+              // Newton fork: a slice opens View Users for the whole range.
+              onClick={(_, index) => {
+                const item = pieData[index];
+                if (!report.projectId || !item) {
+                  return;
+                }
+                pushModal('ViewChartUsers', {
+                  type: 'chart',
+                  chartData: data,
+                  report,
+                  wholeRange: true,
+                  serieId: item.eventId,
+                  breakdownSerieId: item.id,
+                });
+              }}
             >
               {pieData.map((item) => {
                 return (
                   <Cell
                     key={item.id}
                     strokeWidth={4}
-                    className="stroke-background"
+                    className={cn(
+                      'stroke-background',
+                      report.projectId && 'cursor-pointer',
+                    )}
                     fill={item.color}
                   />
                 );
