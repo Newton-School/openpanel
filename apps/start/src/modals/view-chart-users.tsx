@@ -308,6 +308,45 @@ function ChartUsersView({
     }
   };
 
+  const handleCreateCohort = () => {
+    if (!selectedReportSerie || selectedReportSerie.type !== 'event') {
+      return;
+    }
+    const s = selectedReportSerie;
+    const eventName = s.displayName || s.name;
+    const breakdowns = selectedBreakdown?.event.breakdowns ?? {};
+    const breakdownPart = Object.values(breakdowns).length
+      ? ` (${Object.values(breakdowns).join(', ')})`
+      : '';
+    const when = wholeRange
+      ? `in ${rangeLabel}`
+      : `on ${new Date(date ?? Date.now()).toISOString().slice(0, 10)}`;
+    pushModal('AddCohort', {
+      name: `Users who did ${eventName} ${when}${breakdownPart}`,
+      description: `Chart report: ${report.name || 'Unnamed report'}. Users who did "${eventName}" ${when}${breakdownPart ? `, ${Object.entries(breakdowns).map(([k, v]) => `${k} = ${v}`).join(', ')}` : ''}.`,
+      definition: {
+        type: 'chart',
+        criteria: {
+          serie: {
+            id: s.id,
+            type: 'event',
+            name: s.name,
+            displayName: s.displayName,
+            segment: s.segment,
+            filters: s.filters,
+            property: s.property,
+          },
+          breakdowns,
+          interval: report.interval,
+          date: wholeRange ? null : date,
+          range: report.range,
+          startDate: report.startDate,
+          endDate: report.endDate,
+        },
+      },
+    });
+  };
+
   return (
     <ScrollableModal
       header={
@@ -322,6 +361,15 @@ function ChartUsersView({
           />
           {report.series.length > 0 && (
             <div className="col md:row gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={profilesQuery.isLoading || profiles.length === 0}
+                onClick={handleCreateCohort}
+              >
+                <TargetIcon className="mr-2 size-4" />
+                Create cohort
+              </Button>
               <DownloadCsvButton
                 count={profiles.length}
                 disabled={profilesQuery.isLoading || profiles.length === 0}

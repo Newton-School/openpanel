@@ -134,10 +134,35 @@ export const zFunnelCohortDefinition = z.object({
 
 export type FunnelCohortDefinition = z.infer<typeof zFunnelCohortDefinition>;
 
+/**
+ * "Users behind a point/bar/slice of an insights chart": the series the View
+ * Users modal listed, its breakdown values and the time scope. `date` pins
+ * one x-axis bucket (a line-chart point) and is fixed in time; without it
+ * the report range applies and a relative range moves on every refresh.
+ */
+export const zChartCohortDefinition = z.object({
+  type: z.literal('chart'),
+  criteria: z.object({
+    serie: zFunnelCohortSeriesItem,
+    breakdowns: z
+      .record(z.string(), z.string())
+      .default({})
+      .describe('Breakdown property -> value of the clicked series'),
+    interval: z.string().default('day'),
+    date: z.string().nullish().describe('ISO bucket start; omit for whole range'),
+    range: z.string(),
+    startDate: z.string().nullish(),
+    endDate: z.string().nullish(),
+  }),
+});
+
+export type ChartCohortDefinition = z.infer<typeof zChartCohortDefinition>;
+
 export const zCohortDefinition = z.discriminatedUnion('type', [
   zEventBasedCohortDefinition,
   zPropertyBasedCohortDefinition,
   zFunnelCohortDefinition,
+  zChartCohortDefinition,
 ]);
 
 export type CohortDefinition = z.infer<typeof zCohortDefinition>;
