@@ -122,6 +122,7 @@ export const chartSegments = {
   property_average: 'Average of property',
   property_max: 'Max of property',
   property_min: 'Min of property',
+  property_distinct: 'Distinct count of property',
   property_median: 'Median of property',
   property_percentile: 'Percentile of property',
   property_per_user: 'Aggregate property per user',

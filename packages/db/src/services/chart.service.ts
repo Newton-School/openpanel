@@ -340,10 +340,14 @@ function propertyPresentWhere(property: string, projectId?: string): string {
 function singlePassPropertyAggregate(
   event: Pick<IChartEvent, 'segment' | 'propertyPercentile'>,
   valueExpr: string,
+  rawExpr: string,
 ): string | null {
   switch (event.segment) {
     case 'property_sum':
       return `sum(${valueExpr})`;
+    case 'property_distinct':
+      // Distinct raw values, so categorical properties work (distinct pages).
+      return `uniqExact(${rawExpr})`;
     case 'property_average':
       return `avg(${valueExpr})`;
     case 'property_max':
@@ -715,6 +719,7 @@ export async function getChartSql({
     const singlePass = singlePassPropertyAggregate(
       event,
       propertyValueExpr(event.property),
+      getSelectPropertyKey(event.property),
     );
     if (singlePass) {
       sb.select.count = `${singlePass} as count`;
@@ -1002,6 +1007,7 @@ export async function getAggregateChartSql({
     const singlePass = singlePassPropertyAggregate(
       event,
       propertyValueExpr(event.property, projectId),
+      getSelectPropertyKey(event.property, projectId),
     );
     if (singlePass) {
       sb.select.count = `${singlePass} as count`;
