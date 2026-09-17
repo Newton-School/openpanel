@@ -18,7 +18,8 @@ import type { IChartData } from '@/trpc/client';
 import { cn } from '@/utils/cn';
 import { getChartColor } from '@/utils/theme';
 import { DropdownMenuPortal } from '@radix-ui/react-dropdown-menu';
-import { SearchIcon } from 'lucide-react';
+import { SearchIcon, UsersIcon } from 'lucide-react';
+import { pushModal } from '@/modals';
 import { useMemo, useState } from 'react';
 
 import { round } from '@openpanel/common';
@@ -48,10 +49,37 @@ export function Chart({ data }: Props) {
   const [sortBy, setSortBy] = useState<SortOption>('count-desc');
   const {
     isEditMode,
+    report,
     report: { metric, limit, previous },
     options: { onClick, dropdownMenuContent },
   } = useReportChartContext();
   const number = useNumber();
+
+  // Newton fork: every bar opens View Users for the report's whole range,
+  // like a point on a line chart does for its bucket (Mixpanel parity).
+  // Merged ahead of any caller-provided items so existing menus keep working.
+  const menuItemsFor = (serie: (typeof data.series)[number]) => {
+    const items = dropdownMenuContent?.(serie) ?? [];
+    if (!report.projectId) {
+      return items;
+    }
+    return [
+      {
+        icon: UsersIcon,
+        title: 'View Users',
+        onClick: () =>
+          pushModal('ViewChartUsers', {
+            type: 'chart',
+            chartData: data,
+            report,
+            wholeRange: true,
+            serieId: serie.event.id,
+            breakdownSerieId: serie.id,
+          }),
+      },
+      ...items,
+    ];
+  };
 
   // Use useVisibleSeries to add index property for colors
   const { series: allSeriesWithIndex } = useVisibleSeries(data, { limit: 500 });
@@ -158,9 +186,9 @@ export function Chart({ data }: Props) {
           {series.map((serie, idx) => {
             const isClickable =
               !serie.names.includes(NOT_SET_VALUE) && !!onClick;
+            const menuItems = menuItemsFor(serie);
             const isDropDownEnabled =
-              !serie.names.includes(NOT_SET_VALUE) &&
-              (dropdownMenuContent?.(serie) || []).length > 0;
+              !serie.names.includes(NOT_SET_VALUE) && menuItems.length > 0;
 
             const color = getChartColor(serie.index);
             const percentOfTotal = round(
@@ -260,7 +288,7 @@ export function Chart({ data }: Props) {
                           </DropdownMenuTrigger>
                           <DropdownMenuPortal>
                             <DropdownMenuContent>
-                              {dropdownMenuContent?.(serie).map((item) => (
+                              {menuItems.map((item) => (
                                 <DropdownMenuItem
                                   key={item.title}
                                   onClick={(e) => {

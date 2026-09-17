@@ -18,6 +18,8 @@ import {
   getProfilesCached,
   getProfilesLastSeen,
   type LastSeenScope,
+  type ChartProfilesScope,
+  getChartProfileIds,
   getReportById,
   getSelectPropertyKey,
   getSettingsForProject,
@@ -849,10 +851,19 @@ export const chartRouter = createTRPCRouter({
     .input(
       z.object({
         projectId: z.string(),
-        date: z.string().describe('The date for the data point (ISO string)'),
+        date: z
+          .string()
+          .optional()
+          .describe('The date for the data point (ISO string); bucket mode'),
         interval: zTimeInterval.default('day'),
         series: zChartSeries,
         breakdowns: z.record(z.string(), z.string()).optional(),
+        // Whole-range mode (bar, pie, metric): the report's range instead of
+        // one bucket. Dates resolve in the project timezone like the chart.
+        wholeRange: z.boolean().optional(),
+        range: zRange.optional(),
+        startDate: z.string().nullish(),
+        endDate: z.string().nullish(),
         forExport: z
           .boolean()
           .optional()
@@ -862,7 +873,7 @@ export const chartRouter = createTRPCRouter({
       })
     )
     .query(async ({ input }) => {
-      const { projectId, date, series } = input;
+      const { projectId, series } = input;
       const serie = series[0];
 
       if (!serie) {
@@ -873,68 +884,46 @@ export const chartRouter = createTRPCRouter({
         throw new Error('Series must be an event');
       }
 
-      // Build the date range for the specific interval bucket
-      const dateObj = new Date(date);
-      // Build query to get unique profile_ids for this time bucket
-      const { sb, getSql } = createSqlBuilder();
-
-      sb.select.profile_id = 'DISTINCT profile_id';
-      sb.where = getEventFiltersWhereClause(serie.filters, projectId);
-      sb.where.projectId = `project_id = ${sqlstring.escape(projectId)}`;
-      sb.where.dateRange = `${clix.toStartOf('created_at', input.interval)} = ${clix.toDate(sqlstring.escape(formatClickhouseDate(dateObj)), input.interval)}`;
-      if (serie.name !== '*') {
-        sb.where.eventName = `name = ${sqlstring.escape(serie.name)}`;
+      let scope: ChartProfilesScope;
+      let lastSeenScope: Pick<LastSeenScope, 'startDate' | 'endDate'>;
+      if (input.wholeRange) {
+        if (!input.range) {
+          throw new Error('range is required for whole-range View Users');
+        }
+        const { timezone } = await getSettingsForProject(projectId);
+        const dates = getChartStartEndDate(
+          {
+            range: input.range,
+            startDate: input.startDate ?? null,
+            endDate: input.endDate ?? null,
+          },
+          timezone
+        );
+        scope = { type: 'range', ...dates };
+        lastSeenScope = {
+          startDate: formatClickhouseDate(dates.startDate),
+          endDate: formatClickhouseDate(dates.endDate),
+        };
+      } else {
+        if (!input.date) {
+          throw new Error('date is required for bucket View Users');
+        }
+        const dateObj = new Date(input.date);
+        scope = { type: 'bucket', date: dateObj, interval: input.interval };
+        lastSeenScope = chartBucketScope(dateObj, input.interval);
       }
 
-      // Collect profile fields from filters and breakdowns
-      const profileFields = [
-        ...serie.filters
-          .filter((f) => f.name.startsWith('profile.'))
-          .map((f) => f.name.replace('profile.', '')),
-        ...(input.breakdowns
-          ? Object.keys(input.breakdowns)
-              .filter((key) => key.startsWith('profile.'))
-              .map((key) => key.replace('profile.', ''))
-          : []),
-      ];
-
-      if (profileFields.length > 0) {
-        // Extract top-level field names and select only what's needed
-        const fieldsToSelect = uniq(
-          profileFields.map((f) => f.split('.')[0])
-        ).join(', ');
-        sb.joins.profiles = `LEFT ANY JOIN (SELECT id, ${fieldsToSelect} FROM ${TABLE_NAMES.profiles} FINAL WHERE project_id = ${sqlstring.escape(projectId)}) as profile on profile.id = profile_id`;
-      }
-
-      // Check for group filters/breakdowns and add ARRAY JOIN if needed
-      const anyFilterOnGroup = serie.filters.some((f) =>
-        f.name.startsWith('group.')
-      );
-      const anyBreakdownOnGroup = input.breakdowns
-        ? Object.keys(input.breakdowns).some((key) => key.startsWith('group.'))
-        : false;
-      if (anyFilterOnGroup || anyBreakdownOnGroup) {
-        sb.joins.groups = 'ARRAY JOIN groups AS _group_id';
-        sb.joins.groups_cte = `LEFT ANY JOIN (SELECT id, name, type, properties FROM ${TABLE_NAMES.groups} FINAL WHERE project_id = ${sqlstring.escape(projectId)}) AS _g ON _g.id = _group_id`;
-      }
-
-      if (input.breakdowns) {
-        Object.entries(input.breakdowns).forEach(([key, value]) => {
-          // Transform property keys (e.g., properties.method -> properties['method'])
-          const propertyKey = getSelectPropertyKey(key, projectId);
-          sb.where[`breakdown_${key}`] =
-            `${propertyKey} = ${sqlstring.escape(value)}`;
-        });
-      }
-
-      // Get unique profile IDs
-      const profileIds = await chQuery<{ profile_id: string }>(getSql());
-      if (profileIds.length === 0) {
+      const allIds = await getChartProfileIds({
+        projectId,
+        serie,
+        breakdowns: input.breakdowns,
+        scope,
+      });
+      if (allIds.length === 0) {
         return { profiles: [], truncated: false, limit: null };
       }
 
       // Fetch profile details in batches to avoid exceeding ClickHouse max_query_size
-      const allIds = profileIds.map((p) => p.profile_id).filter(Boolean);
       const truncated =
         !!input.forExport && allIds.length > VIEW_USERS_EXPORT_LIMIT;
       const ids = truncated ? allIds.slice(0, VIEW_USERS_EXPORT_LIMIT) : allIds;
@@ -952,7 +941,7 @@ export const chartRouter = createTRPCRouter({
       return {
         profiles: await attachLastSeen(profiles, projectId, {
           eventNames: serie.name === '*' ? [] : [serie.name],
-          ...chartBucketScope(dateObj, input.interval),
+          ...lastSeenScope,
         }),
         truncated,
         limit: VIEW_USERS_EXPORT_LIMIT,
