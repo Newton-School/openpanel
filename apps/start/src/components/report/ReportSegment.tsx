@@ -15,6 +15,7 @@ import {
   UserCheck2Icon,
   UserCheckIcon,
   UsersIcon,
+  FingerprintIcon,
 } from 'lucide-react';
 import { Button } from '../ui/button';
 import {
@@ -55,6 +56,7 @@ export function ReportSegment({
     property_average: EqualApproximatelyIcon,
     property_max: TrendingUpIcon,
     property_min: TrendingDownIcon,
+    property_distinct: FingerprintIcon,
     property_median: SplitIcon,
     property_percentile: PercentIcon,
     property_per_user: UserRoundCogIcon,
