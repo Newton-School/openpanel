@@ -239,3 +239,131 @@ export function aggregateToCSV(
   });
   return buildCSV([header, ...rows]);
 }
+
+type RetentionCsvRow = {
+  cohort_interval: string;
+  sum: number;
+  values: number[];
+  percentages: number[];
+};
+
+const RETENTION_PERIOD_MS: Record<string, number> = {
+  minute: 86_400_000,
+  hour: 86_400_000,
+  day: 86_400_000,
+  week: 7 * 86_400_000,
+};
+
+// Start of period `index` after a cohort date; months by calendar, the rest
+// by fixed length (the retention query treats minute/hour as days).
+function retentionPeriodStart(
+  cohort: Date,
+  interval: string,
+  index: number,
+): Date {
+  if (interval === 'month') {
+    const d = new Date(cohort);
+    d.setUTCMonth(d.getUTCMonth() + index);
+    return d;
+  }
+  const span = RETENTION_PERIOD_MS[interval] ?? RETENTION_PERIOD_MS.day!;
+  return new Date(cohort.getTime() + index * span);
+}
+
+/**
+ * Retention table laid out as Mixpanel's retention export: header
+ * `Date,Total Users,< 1 Day,Day 1,Day 2,…`, a first `$average` row, then one
+ * row per cohort. Periods a cohort has not reached yet (after `rangeEnd`)
+ * are left blank rather than written as 0, as in Mixpanel's file.
+ * `asPercentage` mirrors the report's unit toggle: retained-user counts
+ * (Mixpanel's default) or the share of the cohort in percent.
+ */
+export function retentionToCSV(
+  rows: RetentionCsvRow[],
+  interval: string,
+  asPercentage: boolean,
+  rangeEnd: Date = new Date(),
+): string {
+  const first = rows[0];
+  if (!first) return '';
+  const unit =
+    interval === 'week' ? 'Week' : interval === 'month' ? 'Month' : 'Day';
+  const periodHeaders = first.values.map((_, index) =>
+    index === 0 ? `< 1 ${unit}` : `${unit} ${index}`,
+  );
+  const header = ['Date', 'Total Users', ...periodHeaders];
+  const body = rows.map((row) => {
+    const isAverage = row.cohort_interval === 'Weighted Average';
+    const cohortDate = isAverage ? null : new Date(row.cohort_interval);
+    const cells = (asPercentage ? row.percentages : row.values).map(
+      (value, index) => {
+        if (
+          cohortDate &&
+          !Number.isNaN(cohortDate.getTime()) &&
+          retentionPeriodStart(cohortDate, interval, index) > rangeEnd
+        ) {
+          return '';
+        }
+        return asPercentage ? Math.round(value * 10000) / 100 : value;
+      },
+    );
+    return [isAverage ? '$average' : row.cohort_interval, row.sum, ...cells];
+  });
+  return buildCSV([header, ...body]);
+}
+
+type ConversionCsvSerie = {
+  breakdowns: string[];
+  data: { date: string; total: number; conversions: number; rate: number }[];
+};
+
+/**
+ * Conversion table as shown on screen: one row per breakdown value
+ * ("Conversion" when there is none), the range totals, then the conversion
+ * rate (%) for each bucket.
+ */
+export function conversionToCSV(
+  series: ConversionCsvSerie[],
+  breakdownNames: string[],
+  dateFormat: 'date' | 'datetime' = 'datetime',
+): string {
+  const formatBucket = (date: string) =>
+    dateFormat === 'date' ? date.slice(0, 10) : date;
+  const dates: string[] = [];
+  const seen = new Set<string>();
+  for (const serie of series) {
+    for (const point of serie.data) {
+      if (!seen.has(point.date)) {
+        seen.add(point.date);
+        dates.push(point.date);
+      }
+    }
+  }
+  dates.sort();
+  const header = [
+    ...(breakdownNames.length ? breakdownNames : ['Serie']),
+    'Total',
+    'Conversions',
+    'Average rate (%)',
+    ...dates.map((d) => `${formatBucket(d)} rate (%)`),
+  ];
+  const rows = series.map((serie) => {
+    const labels = breakdownNames.length
+      ? breakdownNames.map((_, i) => serie.breakdowns[i] ?? '')
+      : ['Conversion'];
+    const total = serie.data.reduce((sum, d) => sum + d.total, 0);
+    const conversions = serie.data.reduce((sum, d) => sum + d.conversions, 0);
+    const avgRate = serie.data.length
+      ? serie.data.reduce((sum, d) => sum + d.rate, 0) / serie.data.length
+      : 0;
+    const byDate = new Map(serie.data.map((d) => [d.date, d.rate]));
+    return [
+      ...labels,
+      total,
+      conversions,
+      Math.round(avgRate * 100) / 100,
+      ...dates.map((d) => byDate.get(d) ?? 0),
+    ];
+  });
+  return buildCSV([header, ...rows]);
+}

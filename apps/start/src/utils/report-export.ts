@@ -4,9 +4,11 @@ import type { IReportInput } from '@openpanel/validation';
 import {
   aggregateToCSV,
   chartToCSV,
+  conversionToCSV,
   downloadCSV,
   fileSlug,
   funnelToCSV,
+  retentionToCSV,
 } from './csv-download';
 
 type Trpc = ReturnType<typeof useTRPC>;
@@ -22,6 +24,8 @@ export const EXPORTABLE_CHART_TYPES: ReadonlySet<IReportInput['chartType']> =
     'metric',
     'map',
     'funnel',
+    'conversion',
+    'retention',
   ]);
 
 // Pie and bar plot one aggregated value per series and fetch through
@@ -31,13 +35,30 @@ const AGGREGATE_CHART_TYPES: ReadonlySet<IReportInput['chartType']> = new Set([
   'bar',
 ]);
 
+// The retention chart stores its two events as the first filter's values on
+// the first two series; mirror ReportRetentionChart exactly.
+function retentionEvents(series: IReportInput['series']): [string[], string[]] {
+  const eventSeries = series.filter((item) => item.type === 'event');
+  return [
+    (eventSeries[0]?.filters?.[0]?.value ?? []).map(String),
+    (eventSeries[1]?.filters?.[0]?.value ?? []).map(String),
+  ];
+}
+
 export function canExportReport(report: {
   chartType: IReportInput['chartType'];
-  series: unknown[];
+  series: IReportInput['series'];
 }) {
   // A report with no events has nothing to plot and the funnel endpoint
-  // rejects it, so hide the export until a series exists.
-  return EXPORTABLE_CHART_TYPES.has(report.chartType) && report.series.length > 0;
+  // rejects it, so hide the export until a series exists. Retention needs
+  // both its events picked (same gate the chart itself uses).
+  if (!EXPORTABLE_CHART_TYPES.has(report.chartType)) {
+    return false;
+  }
+  if (report.chartType === 'retention') {
+    return retentionEvents(report.series).every((events) => events.length > 0);
+  }
+  return report.series.length > 0;
 }
 
 /**
@@ -80,6 +101,52 @@ export async function exportReportCsv({
     }
     downloadCSV(aggregateToCSV(res.series, breakdownNames), filename);
     return res.series.length;
+  }
+
+  if (report.chartType === 'retention') {
+    const [firstEvent, secondEvent] = retentionEvents(report.series);
+    const retentionOptions =
+      report.options?.type === 'retention' ? report.options : undefined;
+    const res = await queryClient.fetchQuery({
+      ...trpc.chart.cohort.queryOptions({
+        firstEvent,
+        secondEvent,
+        projectId: report.projectId,
+        range: report.range,
+        startDate: report.startDate,
+        endDate: report.endDate,
+        criteria: retentionOptions?.criteria ?? 'on_or_after',
+        interval: report.interval,
+        shareId: report.shareId,
+        id: 'id' in report ? (report as { id?: string }).id : undefined,
+      }),
+      retry: false,
+    });
+    if (res.length === 0) {
+      return 0;
+    }
+    // Periods after the range end have not happened yet for that cohort.
+    const rangeEnd = report.endDate ? new Date(report.endDate) : new Date();
+    downloadCSV(
+      retentionToCSV(res, report.interval, report.unit === '%', rangeEnd),
+      filename,
+    );
+    return res.length;
+  }
+
+  if (report.chartType === 'conversion') {
+    const res = await queryClient.fetchQuery({
+      ...trpc.chart.conversion.queryOptions(chartInput),
+      retry: false,
+    });
+    if (res.current.length === 0) {
+      return 0;
+    }
+    downloadCSV(
+      conversionToCSV(res.current, breakdownNames, dateFormat),
+      filename,
+    );
+    return res.current.length;
   }
 
   if (report.chartType === 'funnel') {
