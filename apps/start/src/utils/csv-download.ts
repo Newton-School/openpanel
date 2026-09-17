@@ -239,3 +239,97 @@ export function aggregateToCSV(
   });
   return buildCSV([header, ...rows]);
 }
+
+type RetentionCsvRow = {
+  cohort_interval: string;
+  sum: number;
+  values: number[];
+  percentages: number[];
+};
+
+/**
+ * Retention table as shown on screen: one row per cohort (the interval in
+ * which users first did the first event), the cohort size, then one column
+ * per period after it. `asPercentage` mirrors the report's unit toggle:
+ * counts of retained users, or the share of the cohort (0-100).
+ */
+export function retentionToCSV(
+  rows: RetentionCsvRow[],
+  interval: string,
+  asPercentage: boolean,
+): string {
+  const first = rows[0];
+  if (!first) return '';
+  const periodHeaders = first.values.map((_, index) =>
+    index === 0 ? `< ${interval} 1` : `${interval} ${index}`,
+  );
+  const header = [
+    'Cohort',
+    'Total profiles',
+    ...periodHeaders.map((h) => (asPercentage ? `${h} (%)` : h)),
+  ];
+  const body = rows.map((row) => [
+    row.cohort_interval,
+    row.sum,
+    ...(asPercentage
+      ? row.percentages.map((p) => Math.round(p * 10000) / 100)
+      : row.values),
+  ]);
+  return buildCSV([header, ...body]);
+}
+
+type ConversionCsvSerie = {
+  breakdowns: string[];
+  data: { date: string; total: number; conversions: number; rate: number }[];
+};
+
+/**
+ * Conversion table as shown on screen: one row per breakdown value
+ * ("Conversion" when there is none), the range totals, then the conversion
+ * rate (%) for each bucket.
+ */
+export function conversionToCSV(
+  series: ConversionCsvSerie[],
+  breakdownNames: string[],
+  dateFormat: 'date' | 'datetime' = 'datetime',
+): string {
+  const formatBucket = (date: string) =>
+    dateFormat === 'date' ? date.slice(0, 10) : date;
+  const dates: string[] = [];
+  const seen = new Set<string>();
+  for (const serie of series) {
+    for (const point of serie.data) {
+      if (!seen.has(point.date)) {
+        seen.add(point.date);
+        dates.push(point.date);
+      }
+    }
+  }
+  dates.sort();
+  const header = [
+    ...(breakdownNames.length ? breakdownNames : ['Serie']),
+    'Total',
+    'Conversions',
+    'Average rate (%)',
+    ...dates.map((d) => `${formatBucket(d)} rate (%)`),
+  ];
+  const rows = series.map((serie) => {
+    const labels = breakdownNames.length
+      ? breakdownNames.map((_, i) => serie.breakdowns[i] ?? '')
+      : ['Conversion'];
+    const total = serie.data.reduce((sum, d) => sum + d.total, 0);
+    const conversions = serie.data.reduce((sum, d) => sum + d.conversions, 0);
+    const avgRate = serie.data.length
+      ? serie.data.reduce((sum, d) => sum + d.rate, 0) / serie.data.length
+      : 0;
+    const byDate = new Map(serie.data.map((d) => [d.date, d.rate]));
+    return [
+      ...labels,
+      total,
+      conversions,
+      Math.round(avgRate * 100) / 100,
+      ...dates.map((d) => byDate.get(d) ?? 0),
+    ];
+  });
+  return buildCSV([header, ...rows]);
+}
