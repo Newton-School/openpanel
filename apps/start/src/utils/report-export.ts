@@ -125,8 +125,10 @@ export async function exportReportCsv({
     if (res.length === 0) {
       return 0;
     }
+    // Periods after the range end have not happened yet for that cohort.
+    const rangeEnd = report.endDate ? new Date(report.endDate) : new Date();
     downloadCSV(
-      retentionToCSV(res, report.interval, report.unit === '%'),
+      retentionToCSV(res, report.interval, report.unit === '%', rangeEnd),
       filename,
     );
     return res.length;
