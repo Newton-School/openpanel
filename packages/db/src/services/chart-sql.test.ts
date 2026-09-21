@@ -36,7 +36,7 @@ describe('chart sql single-pass total_count', () => {
   it('scans events exactly once and merges uniq states globally (no breakdown)', async () => {
     const sql = await buildChartSql();
     expect(sql).not.toContain('_uc AS (');
-    expect(sql).toContain('uniqState(profile_id) as _uc_state');
+    expect(sql).toContain('uniqState(e.profile_id) as _uc_state');
     expect(sql).toContain('uniqMerge(_uc_state) OVER () as total_count');
     expect(sql).toContain('* EXCEPT (_uc_state)');
     // exactly one scan of the events source

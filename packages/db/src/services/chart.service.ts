@@ -63,11 +63,47 @@ export function buildInlineCohortJoin(
   return `LEFT ANY JOIN (${cohortQuery}) AS ${cohortAlias} ON ${cohortAlias}.profile_id = ${tableAlias}.profile_id`;
 }
 
-export function extractCohortId(breakdownName: string): string | null {
-  if (breakdownName.startsWith('cohort:')) {
-    return breakdownName.split(':')[1] ?? null;
+/**
+ * Cohort breakdowns are `cohort:<id>` for one cohort or `cohort:<id1>,<id2>`
+ * for several, chosen together in the breakdown picker. Several cohorts
+ * behave like Mixpanel's cohort breakdown: each selected cohort yields an
+ * "In" row and a "Not in" row, evaluated independently, so a user in two
+ * selected cohorts counts in both "In" rows.
+ */
+export function extractCohortIds(breakdownName: string): string[] {
+  if (!breakdownName.startsWith('cohort:')) {
+    return [];
   }
-  return null;
+  return (breakdownName.slice('cohort:'.length) || '')
+    .split(',')
+    .map((id) => id.trim())
+    .filter(Boolean);
+}
+
+/** First cohort of a cohort breakdown; the single-cohort label path. */
+export function extractCohortId(breakdownName: string): string | null {
+  return extractCohortIds(breakdownName)[0] ?? null;
+}
+
+export function isMultiCohortBreakdown(breakdownName: string): boolean {
+  return extractCohortIds(breakdownName).length > 1;
+}
+
+/**
+ * Array literal of per-cohort labels for a multi-cohort breakdown, one
+ * element per selected cohort: the cohort name when the row's profile is a
+ * member (LEFT ANY JOIN alias non-empty), "Not <name>" otherwise. Callers
+ * wrap it in arrayJoin() so each row lands in one bucket per cohort.
+ */
+export function buildMultiCohortLabelArray(
+  cohortIds: string[],
+  metadata: Map<string, CohortMetadata>,
+): string {
+  const elements = cohortIds.map((id) => {
+    const name = metadata.get(id)?.name ?? id;
+    return `if(notEmpty(${getCohortAlias(id)}.profile_id), ${sqlstring.escape(name)}, ${sqlstring.escape(`Not ${name}`)})`;
+  });
+  return `[${elements.join(', ')}]`;
 }
 
 export function isAllCohortsBreakdown(breakdownName: string): boolean {
@@ -125,8 +161,7 @@ export function collectCohortIds(
     }
   }
   for (const breakdown of breakdowns) {
-    const id = extractCohortId(breakdown.name);
-    if (id) {
+    for (const id of extractCohortIds(breakdown.name)) {
       ids.add(id);
     }
   }
@@ -433,7 +468,7 @@ function applyPerUserAggregation(
     .filter(([key]) => key !== 'count')
     .map(([, expr]) => expr);
   const innerGroupBy = helpers.join(sb.groupBy, ', ');
-  const innerSql = `SELECT ${[...innerSelects, 'profile_id', `${perUserInnerAggregate(event.propertyInner, valueExpr, rawExpr)} as _pu`].join(', ')} ${helpers.getFrom()} ${helpers.getJoins()} ${helpers.getWhere()} GROUP BY ${innerGroupBy ? `${innerGroupBy}, ` : ''}profile_id`;
+  const innerSql = `SELECT ${[...innerSelects, 'e.profile_id as profile_id', `${perUserInnerAggregate(event.propertyInner, valueExpr, rawExpr)} as _pu`].join(', ')} ${helpers.getFrom()} ${helpers.getJoins()} ${helpers.getWhere()} GROUP BY ${innerGroupBy ? `${innerGroupBy}, ` : ''}e.profile_id`;
 
   // Outer: read the inner aliases. Keys the caller grouped by stay grouping
   // keys; anything else (the constant label_0, the aggregate builder's
@@ -687,6 +722,10 @@ export async function getChartSql({
 
     if (isAllCohortsBreakdown(breakdown.name)) {
       sb.select[key] = `${buildAllCohortsLabelExpr(allCohorts)} as ${key}`;
+    } else if (isMultiCohortBreakdown(breakdown.name)) {
+      // One row per selected cohort per event: "<name>" / "Not <name>".
+      sb.select[key] =
+        `arrayJoin(${buildMultiCohortLabelArray(extractCohortIds(breakdown.name), cohortMetadata)}) as ${key}`;
     } else {
       const breakdownCohortId = extractCohortId(breakdown.name);
       const breakdownCohortName = breakdownCohortId
@@ -699,7 +738,7 @@ export async function getChartSql({
   });
 
   if (event.segment === 'user') {
-    sb.select.count = 'countDistinct(profile_id) as count';
+    sb.select.count = 'countDistinct(e.profile_id) as count';
   }
 
   if (event.segment === 'session') {
@@ -712,7 +751,7 @@ export async function getChartSql({
 
   if (event.segment === 'user_average') {
     sb.select.count =
-      'COUNT(*)::float / COUNT(DISTINCT profile_id)::float as count';
+      'COUNT(*)::float / COUNT(DISTINCT e.profile_id)::float as count';
   }
 
   if (event.property) {
@@ -735,13 +774,16 @@ export async function getChartSql({
 
   if (event.segment === 'one_event_per_user') {
     sb.from = `(
-      SELECT DISTINCT ON (profile_id) * from ${chartEventsTable} e ${getJoins()} WHERE ${join(
+      SELECT DISTINCT ON (e.profile_id) * from ${chartEventsTable} e ${getJoins()} WHERE ${join(
         sb.where,
         ' AND '
       )}
-        ORDER BY profile_id, created_at DESC
+        ORDER BY e.profile_id, created_at DESC
       ) as subQuery`;
+    // Every condition already ran inside the subquery (and its `e.` aliases
+    // are out of scope out here), so the outer query filters nothing more.
     sb.joins = {};
+    sb.where = {};
 
     const sql = rewriteProfilePropertyRefs(
     `${getWith()}${getSelect()} ${getFrom()} ${getJoins()} ${getWhere()} ${getGroupBy()} ${getOrderBy()} ${getFill()}`,
@@ -753,6 +795,9 @@ export async function getChartSql({
     return sql;
   }
 
+  // Every cohort join exposes a profile_id, and with two or more of them
+  // ClickHouse rejects the bare identifier as ambiguous, so the event table's
+  // column is always qualified as e.profile_id in select expressions.
   // Newton fork: single-pass total_count. Upstream computed total_count with a
   // second full scan of the same WHERE (a `_uc` CTE, LEFT ANY JOINed back per
   // breakdown label / injected as a scalar subquery), doubling every chart's
@@ -761,7 +806,12 @@ export async function getChartSql({
   // window aggregate (PARTITION BY the breakdown labels; empty partition =
   // global total). uniq states merge losslessly, so the result matches the
   // two-scan form exactly.
-  sb.select.uc_state = 'uniqState(profile_id) as _uc_state';
+  // The per-user segment has already wrapped the scan in a subquery, where
+  // the event alias is out of scope and profile_id is a plain column.
+  const totalCountProfileCol = sb.from.startsWith('(')
+    ? 'profile_id'
+    : 'e.profile_id';
+  sb.select.uc_state = `uniqState(${totalCountProfileCol}) as _uc_state`;
 
   const totalCountPartition = breakdowns
     .map((_, index) => `label_${index + 1}`)
@@ -968,6 +1018,10 @@ export async function getAggregateChartSql({
 
     if (isAllCohortsBreakdown(breakdown.name)) {
       sb.select[key] = `${buildAllCohortsLabelExpr(allCohorts)} as ${key}`;
+    } else if (isMultiCohortBreakdown(breakdown.name)) {
+      // One row per selected cohort per event: "<name>" / "Not <name>".
+      sb.select[key] =
+        `arrayJoin(${buildMultiCohortLabelArray(extractCohortIds(breakdown.name), cohortMetadata)}) as ${key}`;
     } else {
       const breakdownCohortId = extractCohortId(breakdown.name);
       const breakdownCohortName = breakdownCohortId
@@ -987,7 +1041,7 @@ export async function getAggregateChartSql({
 
   // Handle different segments
   if (event.segment === 'user') {
-    sb.select.count = 'countDistinct(profile_id) as count';
+    sb.select.count = 'countDistinct(e.profile_id) as count';
   }
 
   if (event.segment === 'session') {
@@ -1000,7 +1054,7 @@ export async function getAggregateChartSql({
 
   if (event.segment === 'user_average') {
     sb.select.count =
-      'COUNT(*)::float / COUNT(DISTINCT profile_id)::float as count';
+      'COUNT(*)::float / COUNT(DISTINCT e.profile_id)::float as count';
   }
 
   if (event.property) {
@@ -1026,13 +1080,16 @@ export async function getAggregateChartSql({
 
   if (event.segment === 'one_event_per_user') {
     sb.from = `(
-      SELECT DISTINCT ON (profile_id) * from ${chartEventsTable} e ${getJoins()} WHERE ${join(
+      SELECT DISTINCT ON (e.profile_id) * from ${chartEventsTable} e ${getJoins()} WHERE ${join(
         sb.where,
         ' AND '
       )}
-        ORDER BY profile_id, created_at DESC
+        ORDER BY e.profile_id, created_at DESC
       ) as subQuery`;
+    // Every condition already ran inside the subquery (and its `e.` aliases
+    // are out of scope out here), so the outer query filters nothing more.
     sb.joins = {};
+    sb.where = {};
 
     const sql = rewriteProfilePropertyRefs(
     getSql(),

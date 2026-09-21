@@ -4,7 +4,16 @@ import sqlstring from 'sqlstring';
 import { TABLE_NAMES, chQuery, formatClickhouseDate } from '../clickhouse/client';
 import { clix } from '../clickhouse/query-builder';
 import { createSqlBuilder } from '../sql-builder';
-import { getEventFiltersWhereClause, getSelectPropertyKey } from './chart.service';
+import {
+  buildInlineCohortJoin,
+  extractCohortIds,
+  fetchCohortsMetadata,
+  fetchProjectCohorts,
+  getCohortAlias,
+  getEventFiltersWhereClause,
+  getSelectPropertyKey,
+  isAllCohortsBreakdown,
+} from './chart.service';
 
 /**
  * Which slice of a chart the users are read for: one x-axis bucket (a point
@@ -37,7 +46,7 @@ export async function getChartProfileIds({
 }: GetChartProfileIdsInput): Promise<string[]> {
   const { sb, getSql } = createSqlBuilder();
 
-  sb.select.profile_id = 'DISTINCT profile_id';
+  sb.select.profile_id = 'DISTINCT e.profile_id';
   sb.where = getEventFiltersWhereClause(serie.filters, projectId);
   sb.where.projectId = `project_id = ${sqlstring.escape(projectId)}`;
   if (scope.type === 'bucket') {
@@ -74,6 +83,31 @@ export async function getChartProfileIds({
   }
 
   for (const [key, value] of Object.entries(breakdowns ?? {})) {
+    if (isAllCohortsBreakdown(key) || extractCohortIds(key).length > 0) {
+      // Cohort breakdown rows are "<name>" / "Not <name>": resolve the label
+      // back to one cohort and filter on its membership join.
+      const candidates = isAllCohortsBreakdown(key)
+        ? await fetchProjectCohorts(projectId)
+        : [...(await fetchCohortsMetadata(extractCohortIds(key))).values()];
+      const inCohort = candidates.find((c) => c.name === value);
+      const notInCohort = candidates.find((c) => `Not ${c.name}` === value);
+      const target = inCohort ?? notInCohort;
+      if (!target) {
+        // Unknown label: match nothing rather than everything.
+        sb.where[`breakdown_${key}`] = '0';
+        continue;
+      }
+      sb.joins[`cohort_${target.id}`] = buildInlineCohortJoin(
+        target.id,
+        projectId,
+        'e',
+      );
+      const alias = getCohortAlias(target.id);
+      sb.where[`breakdown_${key}`] = inCohort
+        ? `notEmpty(${alias}.profile_id)`
+        : `empty(${alias}.profile_id)`;
+      continue;
+    }
     const propertyKey = getSelectPropertyKey(key, projectId);
     sb.where[`breakdown_${key}`] = `${propertyKey} = ${sqlstring.escape(value)}`;
   }

@@ -1,6 +1,7 @@
 import type { useTRPC } from '@/integrations/trpc/react';
 import type { QueryClient } from '@tanstack/react-query';
 import type { IReportInput } from '@openpanel/validation';
+import { formatBreakdownName } from './breakdown-name';
 import {
   aggregateToCSV,
   chartToCSV,
@@ -78,9 +79,9 @@ export async function exportReportCsv({
   report: IReportInput & { shareId?: string; visibleSeries?: unknown };
 }) {
   const { visibleSeries: _visibleSeries, ...chartInput } = report;
-  // The "all cohorts" breakdown is stored under the key `cohort`.
+  // Cohort breakdowns are stored as `cohort` (all) or `cohort:<ids>`.
   const breakdownNames = report.breakdowns.map((b) =>
-    b.name === 'cohort' ? 'Cohort' : b.name,
+    formatBreakdownName(b.name),
   );
   // Day and coarser buckets always land on midnight; drop the time part.
   const dateFormat: 'date' | 'datetime' =

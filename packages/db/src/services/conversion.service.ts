@@ -8,13 +8,16 @@ import {
   buildAllCohortsLabelExpr,
   buildAllCohortsMembershipQuery,
   buildInlineCohortJoin,
+  buildMultiCohortLabelArray,
   collectCohortIds,
   extractCohortId,
+  extractCohortIds,
   fetchCohortsMetadata,
   fetchProjectCohorts,
   getEventFiltersWhereClause,
   getSelectPropertyKey,
   isAllCohortsBreakdown,
+  isMultiCohortBreakdown,
 } from './chart.service';
 import { onlyReportEvents } from './reports.service';
 
@@ -66,6 +69,9 @@ export class ConversionService {
     const breakdownExpressions = breakdowns.map((b) => {
       if (isAllCohortsBreakdown(b.name)) {
         return buildAllCohortsLabelExpr(allCohorts);
+      }
+      if (isMultiCohortBreakdown(b.name)) {
+        return `arrayJoin(${buildMultiCohortLabelArray(extractCohortIds(b.name), cohortMetadata)})`;
       }
       const bId = extractCohortId(b.name);
       const bName = bId ? cohortMetadata.get(bId)?.name : undefined;
@@ -182,7 +188,7 @@ export class ConversionService {
         WHERE project_id = '${projectId}'
           AND events.name IN ('${eventA.name}', '${eventB.name}')
           AND created_at BETWEEN toDateTime('${startDate}') AND toDateTime('${endDate}')
-        GROUP BY ${group}${breakdownExpressions.length ? `, ${breakdownExpressions.join(', ')}` : ''})
+        GROUP BY ${group}${breakdownGroupBy.length ? `, ${breakdownGroupBy.join(', ')}` : ''})
       `),
       )
       .where('steps', '>', 0)
