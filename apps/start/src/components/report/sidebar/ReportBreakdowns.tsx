@@ -1,6 +1,7 @@
 import { ColorSquare } from '@/components/color-square';
 import { Combobox } from '@/components/ui/combobox';
 import { useAppParams } from '@/hooks/use-app-params';
+import { useCohorts } from '@/hooks/use-cohorts';
 import { useEventProperties } from '@/hooks/use-event-properties';
 import { useDispatch, useSelector } from '@/redux';
 import { ChevronsUpDownIcon, SplitIcon } from 'lucide-react';
@@ -12,6 +13,25 @@ import { addBreakdown, changeBreakdown, removeBreakdown } from '../reportSlice';
 import { PropertiesCombobox } from './PropertiesCombobox';
 import { ReportBreakdownMore } from './ReportBreakdownMore';
 import type { ReportEventMoreProps } from './ReportEventMore';
+
+// `cohort` = all cohorts; `cohort:<id>,<id>` = the chosen cohorts by name.
+function BreakdownName({ name }: { name: string }) {
+  const { projectId } = useAppParams();
+  const isCohort = name === 'cohort' || name.startsWith('cohort:');
+  const cohorts = useCohorts(
+    { projectId, includeCount: false },
+    { enabled: isCohort },
+  );
+  if (name === 'cohort') {
+    return <>Cohorts (all)</>;
+  }
+  if (name.startsWith('cohort:')) {
+    const ids = name.slice('cohort:'.length).split(',');
+    const names = ids.map((id) => cohorts.find((c) => c.id === id)?.name ?? '…');
+    return <>Cohorts: {names.join(', ')}</>;
+  }
+  return <>{name}</>;
+}
 
 export function ReportBreakdowns() {
   const selectedBreakdowns = useSelector((state) => state.report.breakdowns);
@@ -60,7 +80,9 @@ export function ReportBreakdowns() {
                     >
                       <div className="row w-full gap-2 items-center">
                         <SplitIcon className="size-4" />
-                        {item.name === 'cohort' ? 'Cohorts' : item.name}
+                        <span className="truncate">
+                          <BreakdownName name={item.name} />
+                        </span>
                       </div>
                       <ChevronsUpDownIcon className="ml-2 h-4 w-4 shrink-0 opacity-50" />
                     </Button>

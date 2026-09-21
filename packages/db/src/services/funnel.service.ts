@@ -10,14 +10,17 @@ import {
   buildAllCohortsLabelExpr,
   buildAllCohortsMembershipQuery,
   buildInlineCohortJoin,
+  buildMultiCohortLabelArray,
   collectCohortIds,
   collectProfilePropertyKeys,
   extractCohortId,
+  extractCohortIds,
   fetchCohortsMetadata,
   fetchProjectCohorts,
   getEventFiltersWhereClause,
   getSelectPropertyKey,
   isAllCohortsBreakdown,
+  isMultiCohortBreakdown,
   profilePropertiesCteSelect,
   rewriteProfilePropertyRefs,
 } from './chart.service';
@@ -322,6 +325,13 @@ export class FunnelService {
         // semantics as the chart's INNER JOIN in getChartSql).
         return `${buildAllCohortsLabelExpr(allCohorts)} as b_${index}`;
       }
+      if (isMultiCohortBreakdown(b.name)) {
+        // Membership is per profile, so the label is constant across a
+        // user's events; arrayJoin fans each user out to one bucket per
+        // selected cohort ("<name>" or "Not <name>") and b_i joins the
+        // windowFunnel GROUP BY so every sequence stays intact.
+        return `arrayJoin(${buildMultiCohortLabelArray(extractCohortIds(b.name), cohortMetadata)}) as b_${index}`;
+      }
       const bId = extractCohortId(b.name);
       const bName = bId ? cohortMetadata.get(bId)?.name : undefined;
       const expr = rewriteProfilePropertyRefs(
@@ -339,9 +349,12 @@ export class FunnelService {
       funnelWindowMilliseconds,
       timezone,
       additionalSelects: breakdownSelects,
-      additionalGroupBy: hasAllCohortsBreakdown
-        ? ['_all_cohorts.cohort_id']
-        : [],
+      additionalGroupBy: [
+        ...(hasAllCohortsBreakdown ? ['_all_cohorts.cohort_id'] : []),
+        ...breakdowns.flatMap((b, index) =>
+          isMultiCohortBreakdown(b.name) ? [`b_${index}`] : [],
+        ),
+      ],
       group,
       profilePropertyKeys: profileProps.keys,
     });

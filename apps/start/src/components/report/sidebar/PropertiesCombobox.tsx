@@ -19,6 +19,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { useAppParams } from '@/hooks/use-app-params';
 import { useCohorts } from '@/hooks/use-cohorts';
@@ -69,6 +70,10 @@ function SearchHeader({
   );
 }
 
+// Each selected cohort fans every event out to one more row (arrayJoin), so
+// cap the selection; Mixpanel's picker is bounded the same way in practice.
+const MAX_BREAKDOWN_COHORTS = 10;
+
 export function PropertiesCombobox({
   event,
   children,
@@ -98,10 +103,14 @@ export function PropertiesCombobox({
   >('index');
   const [search, setSearch] = useState('');
   const [direction, setDirection] = useState<'forward' | 'backward'>('forward');
+  // Breakdown mode: cohorts are picked together (Mixpanel-style), one
+  // breakdown carrying `cohort:<id1>,<id2>`; each yields an in / not-in row.
+  const [selectedCohortIds, setSelectedCohortIds] = useState<string[]>([]);
 
   useEffect(() => {
     if (!open) {
       setState(mode ? (mode === 'events' ? 'event' : 'profile') : 'index');
+      setSelectedCohortIds([]);
     }
   }, [open, mode]);
 
@@ -211,15 +220,7 @@ export function PropertiesCombobox({
             className="group justify-between gap-2"
             onClick={(e) => {
               e.preventDefault();
-              if (isBreakdown) {
-                handleSelect({
-                  value: 'cohort',
-                  label: 'Cohorts',
-                  description: 'All cohorts',
-                });
-              } else {
-                handleStateChange('cohort');
-              }
+              handleStateChange('cohort');
             }}
           >
             Cohorts
@@ -237,6 +238,28 @@ export function PropertiesCombobox({
         action.description.toLowerCase().includes(search.toLowerCase()),
     );
 
+    const toggleCohort = (id: string) => {
+      setSelectedCohortIds((prev) =>
+        prev.includes(id)
+          ? prev.filter((x) => x !== id)
+          : prev.length >= MAX_BREAKDOWN_COHORTS
+            ? prev
+            : [...prev, id],
+      );
+    };
+
+    const addSelectedCohorts = () => {
+      const picked = cohorts.filter((c) => selectedCohortIds.includes(c.id));
+      if (picked.length === 0) {
+        return;
+      }
+      handleSelect({
+        value: `cohort:${picked.map((c) => c.id).join(',')}`,
+        label: picked.map((c) => c.name).join(', '),
+        description: `${picked.length} cohort${picked.length === 1 ? '' : 's'}`,
+      });
+    };
+
     return (
       <div className="flex flex-col">
         <SearchHeader
@@ -245,26 +268,104 @@ export function PropertiesCombobox({
           value={search}
         />
         <DropdownMenuSeparator />
+        {isBreakdown && !search && (
+          <>
+            <div
+              className="col cursor-pointer gap-px rounded-md p-2 hover:bg-accent"
+              onClick={() =>
+                handleSelect({
+                  value: 'cohort',
+                  label: 'Cohorts',
+                  description: 'All cohorts',
+                })
+              }
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  handleSelect({
+                    value: 'cohort',
+                    label: 'Cohorts',
+                    description: 'All cohorts',
+                  });
+                }
+              }}
+              role="button"
+              tabIndex={0}
+            >
+              <div className="font-medium">All cohorts</div>
+              <div className="text-muted-foreground text-sm">
+                One row per cohort a user belongs to
+              </div>
+            </div>
+            <DropdownMenuSeparator />
+          </>
+        )}
         <VirtualList
           data={filteredActions}
           height={Math.min(300, filteredActions.length * 40 + 8)}
           itemHeight={40}
           itemKey="value"
         >
-          {(action) => (
-            <motion.div
-              animate={{ opacity: 1, y: 0 }}
-              className="col cursor-pointer gap-px rounded-md p-2 hover:bg-accent"
-              initial={{ opacity: 0, y: 10 }}
-              onClick={() => handleSelect(action)}
-            >
-              <div className="font-medium">{action.label}</div>
-              <div className="text-muted-foreground text-sm">
-                {action.description}
-              </div>
-            </motion.div>
-          )}
+          {(action) => {
+            const id = action.cohortId ?? '';
+            const checked = selectedCohortIds.includes(id);
+            return (
+              <motion.div
+                animate={{ opacity: 1, y: 0 }}
+                className="row cursor-pointer items-center gap-2 rounded-md p-2 hover:bg-accent"
+                initial={{ opacity: 0, y: 10 }}
+                onClick={() =>
+                  isBreakdown ? toggleCohort(id) : handleSelect(action)
+                }
+              >
+                {isBreakdown && (
+                  <Checkbox
+                    checked={checked}
+                    onCheckedChange={() => toggleCohort(id)}
+                    onClick={(e) => e.stopPropagation()}
+                    aria-label={`Select cohort ${action.label}`}
+                  />
+                )}
+                <div className="col gap-px min-w-0">
+                  <div className="font-medium truncate">{action.label}</div>
+                  <div className="text-muted-foreground text-sm truncate">
+                    {action.description}
+                  </div>
+                </div>
+              </motion.div>
+            );
+          }}
         </VirtualList>
+        {isBreakdown && (
+          <>
+            <DropdownMenuSeparator />
+            <div className="row items-center justify-between gap-2 p-2">
+              <span className="text-muted-foreground text-sm">
+                {selectedCohortIds.length} selected
+                {selectedCohortIds.length >= MAX_BREAKDOWN_COHORTS
+                  ? ` (max ${MAX_BREAKDOWN_COHORTS})`
+                  : ''}
+              </span>
+              <div className="row gap-2">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={selectedCohortIds.length === 0}
+                  onClick={() => setSelectedCohortIds([])}
+                >
+                  Clear
+                </Button>
+                <Button
+                  size="sm"
+                  disabled={selectedCohortIds.length === 0}
+                  onClick={addSelectedCohorts}
+                >
+                  Add breakdown
+                </Button>
+              </div>
+            </div>
+          </>
+        )}
       </div>
     );
   };

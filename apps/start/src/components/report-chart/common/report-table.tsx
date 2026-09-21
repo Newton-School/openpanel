@@ -3,6 +3,7 @@ import { useFormatDateInterval } from '@/hooks/use-format-date-interval';
 import { useNumber } from '@/hooks/use-numer-formatter';
 import { useSelector } from '@/redux';
 import type { IChartData } from '@/trpc/client';
+import { formatBreakdownName } from '@/utils/breakdown-name';
 import { cn } from '@/utils/cn';
 import { getChartColor } from '@/utils/theme';
 import type { ColumnDef, Header, Row } from '@tanstack/react-table';
@@ -789,7 +790,7 @@ export function ReportTable({
         },
         header: ({ column }) => {
           if (!isCollapsible) {
-            return propertyName;
+            return formatBreakdownName(propertyName);
           }
 
           // Find all rows at this breakdown level that can be expanded
@@ -862,7 +863,7 @@ export function ReportTable({
               role="button"
               tabIndex={0}
             >
-              <span>{propertyName}</span>
+              <span>{formatBreakdownName(propertyName)}</span>
             </div>
           );
         },
